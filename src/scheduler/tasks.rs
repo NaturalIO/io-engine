@@ -131,7 +131,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
+    pub(crate) fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
         self.sub_tasks = Some(sub_tasks)
     }
 
@@ -170,7 +170,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn set_error(&self, mut errno: i32) {
+    pub(crate) fn set_error(&self, mut errno: i32) {
         if errno == 0 {
             // XXX: EOF does not have code to represent,
             // also when offset is not align to 4096, may return result 0,
@@ -183,12 +183,12 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn set_ok(&self) {
+    pub(crate) fn set_ok(&self) {
         self.res.store(1, Ordering::Release);
     }
 
     #[inline(always)]
-    pub fn callback(mut self) {
+    pub(crate) fn callback(mut self) {
         match self.cb.take() {
             Some(cb) => match cb {
                 IOCallback::Closure(b) => {
@@ -203,7 +203,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn callback_merged(mut self) {
+    pub(crate) fn callback_merged(mut self) {
         if let Some(mut tasks) = self.sub_tasks.take() {
             match self._get_result() {
                 Ok(buffer) => {

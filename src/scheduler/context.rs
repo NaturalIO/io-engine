@@ -76,15 +76,6 @@ pub struct IOContext<C: IOCallbackCustom> {
     noti_sender: Sender<()>,
 }
 
-impl<C: IOCallbackCustom> Clone for IOContext<C> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            noti_sender: self.noti_sender.clone(),
-        }
-    }
-}
-
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum IOChannelType {
     Prio,
