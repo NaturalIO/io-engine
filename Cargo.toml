@@ -2,6 +2,14 @@
 name = "io-engine"
 version = "0.1.0"
 edition = "2024"
+authors = ["plan <frostyplanet@gmail.com>"]
+repository = "https://github.com/NaturalIO/io-engine"
+documentation = "https://docs.rs/io-engine"
+keywords = ["io", "aio", "io_uring"]
+license = "BSD-3-Clause"
+description = """
+Library for block-based IO, intend to mask AIO/io_uring underneath.
+"""
 
 [dependencies]
 rand = "0"
