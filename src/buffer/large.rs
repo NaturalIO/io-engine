@@ -22,7 +22,7 @@ fn is_aligned(offset: usize, size: usize) -> bool {
 }
 
 impl BufferLarge {
-    /// Allocate a buffer
+    /// Allocate a buffer.
     #[inline]
     pub fn alloc(align: usize, size: usize) -> Result<BufferLarge, Errno> {
         let mut ptr: *mut libc::c_void = std::ptr::null_mut();
@@ -51,6 +51,7 @@ impl BufferLarge {
     }
 
     /// Wrap a mutable buffer passed from c code, without owner ship.
+    ///
     /// NOTE: will not free on drop. You have to ensure the buffer valid throughout the lifecycle
     #[inline]
     pub fn from_c_ref_mut(ptr: *mut libc::c_void, size: usize) -> Self {
@@ -64,6 +65,7 @@ impl BufferLarge {
     }
 
     /// Wrap a const buffer passed from c code, without owner ship.
+    ///
     /// NOTE: will not free on drop. You have to ensure the buffer valid throughout the lifecycle
     #[inline]
     pub fn from_c_ref_const(ptr: *const libc::c_void, size: usize) -> Self {

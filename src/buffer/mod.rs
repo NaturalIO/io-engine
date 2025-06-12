@@ -30,7 +30,8 @@ impl fmt::Debug for Buffer {
 }
 
 impl Buffer {
-    /// Allocate aligned buffer for aio
+    /// Allocate aligned buffer for aio.
+    ///
     /// NOTE: Be aware that buffer allocated will not necessarily be zeroed
     #[inline]
     pub fn aligned(size: usize) -> Result<Buffer, Errno> {
@@ -55,6 +56,7 @@ impl Buffer {
     }
 
     /// Wrap a mutable buffer passed from c code without owner ship, as a fake 'static lifetime struct.
+    ///
     /// NOTE: will not free on drop. You have to ensure the buffer valid throughout the lifecycle
     #[inline]
     pub fn from_c_ref_mut(ptr: *mut libc::c_void, size: usize) -> Self {
@@ -62,6 +64,7 @@ impl Buffer {
     }
 
     /// Wrap a const buffer passed from c code, without owner ship, as a fake 'static lifetime struct.
+    ///
     /// NOTE: will not free on drop. You have to ensure the buffer valid throughout the lifecycle
     #[inline]
     pub fn from_c_ref_const(ptr: *const libc::c_void, size: usize) -> Self {
@@ -94,8 +97,12 @@ impl Buffer {
         }
     }
 
-    /// Copy from another u8 slice into self[offset..]. NOTE: will not do memset.
+    /// Copy from another u8 slice into self[offset..].
+    ///
+    /// NOTE: will not do memset.
+    ///
     /// Argument:
+    ///
     ///   offset: Address of this buffer to start filling.
     #[inline]
     pub fn copy_from(&mut self, offset: usize, other: &[u8]) {
@@ -110,7 +117,9 @@ impl Buffer {
     }
 
     /// Copy from another u8 slice into self[offset..], and memset the rest part.
+    ///
     /// Argument:
+    ///
     ///   offset: Address of this buffer to start filling.
     #[inline]
     pub fn copy_and_clean(&mut self, offset: usize, other: &[u8]) {
