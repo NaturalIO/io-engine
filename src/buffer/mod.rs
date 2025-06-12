@@ -1,7 +1,7 @@
 mod large;
-pub mod utils;
+mod utils;
 use large::{BufferLarge, MIN_ALIGN};
-use utils::*;
+pub use utils::*;
 
 #[cfg(test)]
 mod test;
@@ -193,6 +193,16 @@ impl Deref for Buffer {
         match self {
             Self::Large(buf) => buf.as_ref(),
             Self::Vec(v) => &v,
+        }
+    }
+}
+
+impl AsRef<[u8]> for Buffer {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Large(buf) => buf.as_ref(),
+            Self::Vec(v) => v.as_ref(),
         }
     }
 }
