@@ -1,0 +1,12 @@
+[package]
+name = "io-engine-aio-bindings"
+version = "0.1.4"
+authors = ["plan <frostyplanet@gmail.com>"]
+description = "Native kernel call bindings for Linux AIO"
+repository="https://github.com/naturalio/io-engine/aio-bindings"
+license = "MIT"
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "^0.72.0"
