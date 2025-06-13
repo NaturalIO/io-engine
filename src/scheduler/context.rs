@@ -219,6 +219,8 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
         if slot.set_written(info.res as usize, &self.cb_workers) {
             return true;
         }
+        trace!("io not enough, resubmit");
+        // Write data not enough, resubmit.
         let mut arr: [*mut aio::iocb; 1] = [&mut slot.iocb as *mut aio::iocb];
         'submit: loop {
             let result = aio::io_submit(self.context, 1, arr.as_mut_ptr() as *mut *mut aio::iocb);
@@ -245,12 +247,6 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
             tv_nsec: 0,
         };
         loop {
-            if !self.running.load(Ordering::Acquire) {
-                // wait for all submmited io return
-                if self.free_slots_count.load(Ordering::SeqCst) == self.depth {
-                    break;
-                }
-            }
             infos.clear();
             let result = aio::io_getevents(context, 1, depth as i64, infos.as_mut_ptr(), unsafe {
                 std::mem::transmute::<&aio::timespec, *mut aio::timespec>(&ts)
@@ -264,6 +260,14 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
                     break;
                 }
                 error!("io_getevents errno: {}", -result);
+                continue;
+            } else if result == 0 {
+                if !self.running.load(Ordering::Acquire) {
+                    // wait for all submmited io return
+                    if self.free_slots_count.load(Ordering::SeqCst) == self.depth {
+                        break;
+                    }
+                }
                 continue;
             }
             let _ = self
