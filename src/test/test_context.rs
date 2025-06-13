@@ -11,7 +11,7 @@ fn test_read_write() {
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.fd;
-    let ctx = IOContext::<DefaultCb>::new(fd, 2, &IOWorkers::new(1)).unwrap();
+    let ctx = IOContext::<ClosureCb>::new(fd, 2, &IOWorkers::new(1)).unwrap();
 
     let ctx1 = ctx.clone();
     let rt = tokio::runtime::Builder::new_multi_thread()

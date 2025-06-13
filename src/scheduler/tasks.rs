@@ -44,27 +44,25 @@ pub trait IOCallbackCustom: Sized + 'static + Send + Unpin {
     fn call(self, _event: &mut IOEvent<Self>);
 }
 
-pub struct DefaultCb();
+/// Closure callback for IOEvent
+pub struct ClosureCb(pub Box<dyn FnOnce(&mut IOEvent<Self>) + Send + Sync + 'static>);
 
-impl IOCallbackCustom for DefaultCb {
-    fn call(self, _event: &mut IOEvent<Self>) {}
+impl IOCallbackCustom for ClosureCb {
+    fn call(self, event: &mut IOEvent<Self>) {
+        (self.0)(event)
+    }
 }
 
-pub enum IOCallback<C: IOCallbackCustom> {
-    Closure(Box<dyn FnOnce(&mut IOEvent<C>) -> () + Send + Sync>),
-    Custom(C),
-}
-
-// State information that is associated with an I/O request that is currently in flight.
+// Carries the infomation of read/write event
 pub struct IOEvent<C: IOCallbackCustom> {
     // Linux kernal I/O control block which can be submitted to io_submit
     pub(crate) node: EmbeddedListNode,
     pub buf: Option<Buffer>,
-    pub offset: i64,
     pub action: IOAction,
+    pub offset: i64,
     res: AtomicI32,
-    cb: Option<IOCallback<C>>,
-    pub sub_tasks: Option<EmbeddedList>,
+    cb: Option<C>,
+    sub_tasks: Option<EmbeddedList>,
 }
 
 impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
@@ -120,8 +118,9 @@ impl<C: IOCallbackCustom> IOEvent<C> {
         }
     }
 
+    /// Set callback for IOEvent, might be closure or a custom struct
     #[inline(always)]
-    pub fn set_callback(&mut self, cb: IOCallback<C>) {
+    pub fn set_callback(&mut self, cb: C) {
         self.cb = Some(cb);
     }
 
@@ -190,14 +189,9 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     #[inline(always)]
     pub(crate) fn callback(mut self) {
         match self.cb.take() {
-            Some(cb) => match cb {
-                IOCallback::Closure(b) => {
-                    b(&mut self);
-                }
-                IOCallback::Custom(d) => {
-                    d.call(&mut self);
-                }
-            },
+            Some(cb) => {
+                cb.call(&mut self);
+            }
             None => return,
         }
     }

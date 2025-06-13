@@ -16,7 +16,7 @@ fn test_merged_submit() {
 
     println!("created temp file fd={}", owned_fd.fd);
     let fd = owned_fd.fd;
-    let ctx = IOContext::<DefaultCb>::new(fd, 128, &IOWorkers::new(2)).unwrap();
+    let ctx = IOContext::<ClosureCb>::new(fd, 128, &IOWorkers::new(2)).unwrap();
 
     _test_merge_submit(ctx.clone(), 1024, 1024, 16 * 1024);
     _test_merge_submit(ctx.clone(), 1024, 512, 16 * 1024);
@@ -30,7 +30,7 @@ fn test_merged_submit() {
 }
 
 fn _test_merge_submit(
-    ctx: Arc<IOContext<DefaultCb>>,
+    ctx: Arc<IOContext<ClosureCb>>,
     io_size: usize,
     batch_num: usize,
     merge_size_limit: usize,
@@ -61,7 +61,7 @@ fn _test_merge_submit(
         let wg = WaitGroup::new();
 
         let _wg = wg.clone();
-        let write_cb = Box::new(move |_event: &mut IOEvent<DefaultCb>| {
+        let write_cb = Box::new(move |_event: &mut IOEvent<ClosureCb>| {
             _wg.done();
         });
 
@@ -69,7 +69,7 @@ fn _test_merge_submit(
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
             let mut event = Box::new(IOEvent::new(buf, IOAction::Write, (i * io_size) as i64));
-            event.set_callback(IOCallback::Closure(write_cb.clone()));
+            event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
         }
@@ -79,7 +79,7 @@ fn _test_merge_submit(
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
             let mut event = Box::new(IOEvent::new(buf, IOAction::Write, (i * io_size) as i64));
-            event.set_callback(IOCallback::Closure(write_cb.clone()));
+            event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
         }
@@ -89,7 +89,7 @@ fn _test_merge_submit(
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
             let mut event = Box::new(IOEvent::new(buf, IOAction::Write, (i * io_size) as i64));
-            event.set_callback(IOCallback::Closure(write_cb.clone()));
+            event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
         }
@@ -113,8 +113,8 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(IOCallback::Closure(Box::new(
-                move |event: &mut IOEvent<DefaultCb>| {
+            event.set_callback(ClosureCb(Box::new(
+                move |event: &mut IOEvent<ClosureCb>| {
                     let mut _buf_all = _read_buf.lock().unwrap();
                     match event.get_result() {
                         Ok(buffer) => {
@@ -139,8 +139,8 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(IOCallback::Closure(Box::new(
-                move |event: &mut IOEvent<DefaultCb>| {
+            event.set_callback(ClosureCb(Box::new(
+                move |event: &mut IOEvent<ClosureCb>| {
                     let mut _buf_all = _read_buf.lock().unwrap();
                     match event.get_result() {
                         Ok(buffer) => {
@@ -164,8 +164,8 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(IOCallback::Closure(Box::new(
-                move |event: &mut IOEvent<DefaultCb>| {
+            event.set_callback(ClosureCb(Box::new(
+                move |event: &mut IOEvent<ClosureCb>| {
                     let mut _buf_all = _read_buf.lock().unwrap();
                     match event.get_result() {
                         Ok(buffer) => {

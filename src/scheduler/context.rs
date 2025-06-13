@@ -77,10 +77,11 @@ pub struct IOContext<C: IOCallbackCustom> {
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum IOChannelType {
-    Prio,
-    Read,
-    Write,
+    Prio = 0,
+    Read = 1,
+    Write = 2,
 }
 
 impl<C: IOCallbackCustom> Drop for IOContext<C> {
@@ -91,7 +92,6 @@ impl<C: IOCallbackCustom> Drop for IOContext<C> {
 }
 
 impl<C: IOCallbackCustom> IOContext<C> {
-    // TODO try https://github.com/polyfractal/bounded-spsc-queue
     pub fn new(fd: RawFd, depth: usize, cbs: &IOWorkers<C>) -> Result<Arc<Self>, io::Error> {
         let mut context: aio::aio_context_t = 0;
         if aio::io_setup(depth as c_long, &mut context) != 0 {
@@ -163,13 +163,9 @@ impl<C: IOCallbackCustom> IOContext<C> {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn pending_count(&self) -> usize {
-        let _self = self.get_inner();
-        let mut count = 0;
-        count += _self.prio_count.load(Ordering::Acquire);
-        count += _self.read_count.load(Ordering::Acquire);
-        count += _self.write_count.load(Ordering::Acquire);
-        count
+        self.inner.total_count.load(Ordering::Acquire)
     }
 
     pub fn running_count(&self) -> usize {
@@ -182,6 +178,7 @@ impl<C: IOCallbackCustom> IOContext<C> {
         }
     }
 
+    #[inline]
     fn _submit(&self, event: IOEventTask<C>, channel_type: IOChannelType) {
         let inner = &self.get_inner();
         if !inner.running.load(Ordering::Acquire) {

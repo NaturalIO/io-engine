@@ -9,16 +9,16 @@ struct A {}
 impl A {
     fn do_io(self: Arc<Self>) {
         let buffer = Buffer::aligned(4096).unwrap();
-        let mut event = IOEvent::<DefaultCb>::new(buffer, IOAction::Write, 0);
+        let mut event = IOEvent::<ClosureCb>::new(buffer, IOAction::Write, 0);
         let self1 = self.clone();
-        let cb = move |_event: &mut IOEvent<DefaultCb>| {
+        let cb = move |_event: &mut IOEvent<ClosureCb>| {
             Self::done_event(self1, _event);
         };
-        event.set_callback(IOCallback::Closure(Box::new(cb)));
+        event.set_callback(ClosureCb(Box::new(cb)));
         event.callback();
     }
 
-    fn done_event(_self: Arc<Self>, _event: &mut IOEvent<DefaultCb>) {
+    fn done_event(_self: Arc<Self>, _event: &mut IOEvent<ClosureCb>) {
         println!("done event");
     }
 }
@@ -26,7 +26,7 @@ impl A {
 #[test]
 fn test_ioevent() {
     let buffer = Buffer::aligned(4096).unwrap();
-    let mut event = IOEvent::<DefaultCb>::new(buffer, IOAction::Write, 0);
+    let mut event = IOEvent::<ClosureCb>::new(buffer, IOAction::Write, 0);
     assert!(!event.is_done());
     event.set_ok();
     assert!(event.is_done());
