@@ -1,4 +1,5 @@
 use crate::scheduler::*;
+use std::os::fd::RawFd;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -16,20 +17,21 @@ fn test_merged_submit() {
 
     println!("created temp file fd={}", owned_fd.fd);
     let fd = owned_fd.fd;
-    let ctx = IOContext::<ClosureCb>::new(fd, 128, &IOWorkers::new(2)).unwrap();
+    let ctx = IOContext::<ClosureCb>::new(128, &IOWorkers::new(2)).unwrap();
 
-    _test_merge_submit(ctx.clone(), 1024, 1024, 16 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 512, 16 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 256, 16 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 64, 64 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 64, 32 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 64, 16 * 1024);
-    _test_merge_submit(ctx.clone(), 1024, 64, 1 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 1024, 16 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 512, 16 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 256, 16 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 64, 64 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 64, 32 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 64, 16 * 1024);
+    _test_merge_submit(fd, ctx.clone(), 1024, 64, 1 * 1024);
 
     std::thread::sleep(Duration::from_secs(1));
 }
 
 fn _test_merge_submit(
+    fd: RawFd,
     ctx: Arc<IOContext<ClosureCb>>,
     io_size: usize,
     batch_num: usize,
@@ -40,6 +42,7 @@ fn _test_merge_submit(
         io_size, batch_num, merge_size_limit
     );
     let mut m_write = IOMergeSubmitter::new(
+        fd,
         ctx.clone(),
         merge_size_limit,
         IOAction::Write,
@@ -68,7 +71,7 @@ fn _test_merge_submit(
         for i in (0..batch_num / 2).step_by(2) {
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(buf, IOAction::Write, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
             event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
@@ -78,7 +81,7 @@ fn _test_merge_submit(
         for i in batch_num / 2..batch_num {
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(buf, IOAction::Write, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
             event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
@@ -88,7 +91,7 @@ fn _test_merge_submit(
         for i in (1..(batch_num / 2 + 1)).step_by(2) {
             let mut buf = Buffer::aligned(io_size).unwrap();
             buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(buf, IOAction::Write, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
             event.set_callback(ClosureCb(write_cb.clone()));
             wg.add(1);
             m_write.add_event(event).expect("add_event");
@@ -100,6 +103,7 @@ fn _test_merge_submit(
 
         let read_buf = Arc::new(Mutex::new(Buffer::aligned(batch_num * io_size).unwrap()));
         let mut m_read = IOMergeSubmitter::new(
+            fd,
             ctx.clone(),
             merge_size_limit,
             IOAction::Read,
@@ -109,7 +113,7 @@ fn _test_merge_submit(
 
         for i in (0..batch_num / 2).step_by(2) {
             let buf = Buffer::aligned(io_size).unwrap();
-            let mut event = IOEvent::new(buf, IOAction::Read, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
@@ -135,7 +139,7 @@ fn _test_merge_submit(
 
         for i in batch_num / 2..batch_num {
             let buf = Buffer::aligned(io_size).unwrap();
-            let mut event = IOEvent::new(buf, IOAction::Read, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
@@ -160,7 +164,7 @@ fn _test_merge_submit(
         println!("--- read 2");
         for i in (1..(batch_num / 2 + 1)).step_by(2) {
             let buf = Buffer::aligned(io_size).unwrap();
-            let mut event = IOEvent::new(buf, IOAction::Read, (i * io_size) as i64);
+            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();

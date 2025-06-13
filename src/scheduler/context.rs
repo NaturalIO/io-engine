@@ -25,7 +25,6 @@ use std::{
     collections::VecDeque,
     io,
     mem::transmute,
-    os::unix::io::RawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -89,18 +88,20 @@ impl<C: IOCallbackCustom> Drop for IOContext<C> {
 }
 
 impl<C: IOCallbackCustom> IOContext<C> {
-    pub fn new(fd: RawFd, depth: usize, cbs: &IOWorkers<C>) -> Result<Arc<Self>, io::Error> {
+    pub fn new(depth: usize, cbs: &IOWorkers<C>) -> Result<Arc<Self>, io::Error> {
         let mut context: aio::aio_context_t = 0;
         if aio::io_setup(depth as c_long, &mut context) != 0 {
             return Err(io::Error::last_os_error());
         }
         let (s_noti, r_noti) = bounded::<()>(1);
         let (s_free, r_free) = bounded::<u16>(depth);
-        for i in 1..depth + 1 {
+        for i in 0..depth {
             let _ = s_free.send(i as u16);
         }
         let mut slots = Vec::with_capacity(depth);
-        slots.resize_with(depth + 1, || IOEventTaskSlot::new(fd as libc::__u32));
+        for slot_id in 0..depth {
+            slots.push(IOEventTaskSlot::new(slot_id as u64));
+        }
         let inner = Arc::new(IOContextInner {
             context,
             depth,

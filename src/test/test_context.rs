@@ -10,7 +10,7 @@ fn test_read_write() {
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.fd;
-    let ctx = IOContext::<ClosureCb>::new(fd, 2, &IOWorkers::new(1)).unwrap();
+    let ctx = IOContext::<ClosureCb>::new(2, &IOWorkers::new(1)).unwrap();
 
     let (done_tx, done_rx) = unbounded::<Box<IOEvent<ClosureCb>>>();
     let callback = Box::new(move |event: Box<IOEvent<ClosureCb>>| {
@@ -18,7 +18,7 @@ fn test_read_write() {
     });
     let buffer3 = Buffer::aligned(4096).unwrap();
     // wrong offset
-    let mut event = IOEvent::new(buffer3, IOAction::Read, 100);
+    let mut event = IOEvent::new(fd, buffer3, IOAction::Read, 100);
     event.set_callback(ClosureCb(callback.clone()));
     ctx.submit(event, IOChannelType::Prio).expect("submit");
     let mut event = done_rx.recv().unwrap();
@@ -40,14 +40,14 @@ fn test_read_write() {
             let mut buffer = Buffer::aligned(4096).unwrap();
             rand_buffer(&mut buffer);
             let digest = md5::compute(&buffer);
-            let mut event = IOEvent::new(buffer, IOAction::Write, 4096 * i as i64);
+            let mut event = IOEvent::new(fd, buffer, IOAction::Write, 4096 * i as i64);
             event.set_callback(ClosureCb(callback.clone()));
             ctx.submit(event, IOChannelType::Write).expect("submit");
             let event = done_rx.recv().unwrap();
             assert!(event.is_done());
             // read
             let buffer2 = Buffer::aligned(4096).unwrap();
-            let mut event = IOEvent::new(buffer2, IOAction::Read, 4096 * i as i64);
+            let mut event = IOEvent::new(fd, buffer2, IOAction::Read, 4096 * i as i64);
             event.set_callback(ClosureCb(callback.clone()));
             ctx.submit(event, IOChannelType::Read).expect("submit");
             let mut event = done_rx.recv().unwrap();

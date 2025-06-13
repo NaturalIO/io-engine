@@ -23,6 +23,7 @@ SOFTWARE.
 use super::embedded_list::*;
 use std::io;
 use std::mem::transmute;
+use std::os::fd::RawFd;
 use std::sync::Arc;
 
 use super::{
@@ -122,7 +123,11 @@ impl<C: IOCallbackCustom> EventMergeBuffer<C> {
     }
 }
 
+/// Try to merge sequential IOEvent.
+///
+/// NOTE: Assuming all the IOEvents are of the same file, only debug mode will do validation.
 pub struct IOMergeSubmitter<C: IOCallbackCustom> {
+    fd: RawFd,
     buffer: EventMergeBuffer<C>,
     ctx: Arc<IOContext<C>>,
     action: IOAction,
@@ -131,6 +136,7 @@ pub struct IOMergeSubmitter<C: IOCallbackCustom> {
 
 impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
     pub fn new(
+        fd: RawFd,
         ctx: Arc<IOContext<C>>,
         merge_size_limit: usize,
         action: IOAction,
@@ -146,6 +152,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
             }
         }
         Self {
+            fd,
             buffer: EventMergeBuffer::new(merge_size_limit),
             ctx,
             action,
@@ -153,7 +160,9 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
         }
     }
 
+    /// On debug mode, will validate event.fd and event.action.
     pub fn add_event(&mut self, event: Box<IOEvent<C>>) -> Result<(), io::Error> {
+        log_debug_assert_eq!(self.fd, event.fd);
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
 
@@ -204,7 +213,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                             _offset += _size;
                         }
                     }
-                    let mut event = IOEvent::<C>::new(buffer, self.action, offset);
+                    let mut event = IOEvent::<C>::new(self.fd, buffer, self.action, offset);
                     event.set_subtasks(events);
                     self.ctx.submit(event, self.channel_type)?;
                 }

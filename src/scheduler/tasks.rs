@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use std::os::fd::RawFd;
 use std::{
     fmt,
     sync::atomic::{AtomicI32, Ordering},
@@ -52,12 +53,15 @@ impl IOCallbackCustom for ClosureCb {
 }
 
 // Carries the infomation of read/write event
+#[repr(C)]
 pub struct IOEvent<C: IOCallbackCustom> {
-    // Linux kernal I/O control block which can be submitted to io_submit
+    /// make sure EmbeddedListNode always in the front.
+    /// This is for putting sub_tasks in the link list, without additional allocation.
     pub(crate) node: EmbeddedListNode,
     pub buf: Option<Buffer>,
-    pub action: IOAction,
     pub offset: i64,
+    pub action: IOAction,
+    pub fd: RawFd,
     res: AtomicI32,
     cb: Option<C>,
     sub_tasks: Option<EmbeddedList>,
@@ -81,7 +85,7 @@ impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
 
 impl<C: IOCallbackCustom> IOEvent<C> {
     #[inline]
-    pub fn new(buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
+    pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
         log_assert!(
             buf.len() > 0,
             "{:?} offset={}, buffer size == 0",
@@ -90,6 +94,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
         );
         Box::new(Self {
             buf: Some(buf),
+            fd,
             action,
             offset,
             res: AtomicI32::new(0),
@@ -222,10 +227,10 @@ pub(crate) struct IOEventTaskSlot<C: IOCallbackCustom> {
 }
 
 impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
-    pub(crate) fn new(fd: libc::__u32) -> Self {
+    pub(crate) fn new(slot_id: u64) -> Self {
         Self {
             iocb: aio::iocb {
-                aio_fildes: fd,
+                aio_data: slot_id,
                 aio_reqprio: 1,
                 ..Default::default()
             },
@@ -237,6 +242,7 @@ impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
     pub(crate) fn fill_slot(&mut self, event: Box<IOEvent<C>>, slot_id: u16) {
         let iocb = &mut self.iocb;
         iocb.aio_data = slot_id as libc::__u64;
+        iocb.aio_fildes = event.fd as libc::__u32;
         let buf = event.buf.as_ref().unwrap();
         iocb.aio_lio_opcode = event.action as u16;
         iocb.aio_buf = buf.get_raw() as u64;
