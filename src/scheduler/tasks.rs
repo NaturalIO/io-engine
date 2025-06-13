@@ -22,9 +22,7 @@ SOFTWARE.
 
 use std::{
     fmt,
-    mem::transmute,
     sync::atomic::{AtomicI32, Ordering},
-    task::Waker,
 };
 
 use nix::errno::Errno;
@@ -41,14 +39,14 @@ pub enum IOAction {
 
 /// Define your callback with this trait
 pub trait IOCallbackCustom: Sized + 'static + Send + Unpin {
-    fn call(self, _event: &mut IOEvent<Self>);
+    fn call(self, _event: Box<IOEvent<Self>>);
 }
 
 /// Closure callback for IOEvent
-pub struct ClosureCb(pub Box<dyn FnOnce(&mut IOEvent<Self>) + Send + Sync + 'static>);
+pub struct ClosureCb(pub Box<dyn FnOnce(Box<IOEvent<Self>>) + Send + Sync + 'static>);
 
 impl IOCallbackCustom for ClosureCb {
-    fn call(self, event: &mut IOEvent<Self>) {
+    fn call(self, event: Box<IOEvent<Self>>) {
         (self.0)(event)
     }
 }
@@ -81,33 +79,16 @@ impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
     }
 }
 
-pub(crate) struct IOEventTaskOne<C: IOCallbackCustom> {
-    _event: *const IOEvent<C>, // use when caller blocked
-    waker: Option<Waker>,
-}
-
-pub(crate) struct IOEventTaskAsync<C: IOCallbackCustom> {
-    event: Option<Box<IOEvent<C>>>, // use when caller process in streaming mode
-}
-
-pub(crate) enum IOEventTask<C: IOCallbackCustom> {
-    One(IOEventTaskOne<C>),
-    Async(IOEventTaskAsync<C>),
-}
-
-unsafe impl<C: IOCallbackCustom> Send for IOEventTask<C> {}
-unsafe impl<C: IOCallbackCustom> Sync for IOEventTask<C> {}
-
 impl<C: IOCallbackCustom> IOEvent<C> {
     #[inline]
-    pub fn new(buf: Buffer, action: IOAction, offset: i64) -> Self {
+    pub fn new(buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
         log_assert!(
             buf.len() > 0,
             "{:?} offset={}, buffer size == 0",
             action,
             offset
         );
-        Self {
+        Box::new(Self {
             buf: Some(buf),
             action,
             offset,
@@ -115,7 +96,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
             cb: None,
             sub_tasks: None,
             node: Default::default(),
-        }
+        })
     }
 
     /// Set callback for IOEvent, might be closure or a custom struct
@@ -187,17 +168,17 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub(crate) fn callback(mut self) {
+    pub(crate) fn callback(mut self: Box<Self>) {
         match self.cb.take() {
             Some(cb) => {
-                cb.call(&mut self);
+                cb.call(self);
             }
             None => return,
         }
     }
 
     #[inline(always)]
-    pub(crate) fn callback_merged(mut self) {
+    pub(crate) fn callback_merged(mut self: Box<Self>) {
         if let Some(mut tasks) = self.sub_tasks.take() {
             match self._get_result() {
                 Ok(buffer) => {
@@ -235,47 +216,9 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 }
 
-impl<C: IOCallbackCustom> IOEventTask<C> {
-    #[inline(always)]
-    pub fn new_one(event: &IOEvent<C>, waker: Waker) -> Self {
-        Self::One(IOEventTaskOne {
-            _event: event as *const IOEvent<C>,
-            waker: Some(waker),
-        })
-    }
-
-    #[inline(always)]
-    pub fn new_async(event: Box<IOEvent<C>>) -> Self {
-        Self::Async(IOEventTaskAsync { event: Some(event) })
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_error(self, errno: i32, cb_workers: Option<&IOWorkers<C>>) {
-        match self {
-            Self::One(o) => {
-                unsafe {
-                    (*o._event).set_error(errno);
-                }
-                if let Some(waker) = o.waker.as_ref() {
-                    waker.wake_by_ref();
-                }
-            }
-            Self::Async(mut b) => {
-                let event = b.event.take().unwrap();
-                event.set_error(errno);
-                if let Some(cb) = cb_workers {
-                    cb.send(event);
-                } else {
-                    event.callback_merged();
-                }
-            }
-        }
-    }
-}
-
 pub(crate) struct IOEventTaskSlot<C: IOCallbackCustom> {
     pub(crate) iocb: aio::iocb,
-    pub(crate) task: Option<IOEventTask<C>>,
+    pub(crate) event: Option<Box<IOEvent<C>>>,
 }
 
 impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
@@ -286,58 +229,28 @@ impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
                 aio_reqprio: 1,
                 ..Default::default()
             },
-            task: None,
+            event: None,
         }
     }
 
     #[inline(always)]
-    pub(crate) fn fill_slot(&mut self, task: IOEventTask<C>, slot_id: u16) {
+    pub(crate) fn fill_slot(&mut self, event: Box<IOEvent<C>>, slot_id: u16) {
         let iocb = &mut self.iocb;
         iocb.aio_data = slot_id as libc::__u64;
-        match task {
-            IOEventTask::Async(ref _task) => {
-                let event = _task.event.as_ref().unwrap();
-                let buf = event.buf.as_ref().unwrap();
-                iocb.aio_lio_opcode = event.action as u16;
-                iocb.aio_buf = buf.get_raw() as u64;
-                iocb.aio_nbytes = buf.len() as u64;
-                iocb.aio_offset = event.offset;
-            }
-            IOEventTask::One(ref _task) => {
-                log_debug_assert!(
-                    _task._event != std::ptr::null_mut(),
-                    "IOEventTask._event assume notnull"
-                );
-                let event: &IOEvent<C> = unsafe { transmute(_task._event) };
-                let buf = event.buf.as_ref().unwrap();
-                iocb.aio_lio_opcode = event.action as u16;
-                iocb.aio_buf = buf.get_raw() as u64;
-                iocb.aio_nbytes = buf.len() as u64;
-                iocb.aio_offset = event.offset;
-            }
-        }
-        self.task.replace(task);
+        let buf = event.buf.as_ref().unwrap();
+        iocb.aio_lio_opcode = event.action as u16;
+        iocb.aio_buf = buf.get_raw() as u64;
+        iocb.aio_nbytes = buf.len() as u64;
+        iocb.aio_offset = event.offset;
+        self.event.replace(event);
     }
 
     #[inline(always)]
     pub(crate) fn set_written(&mut self, written: usize, cb: &IOWorkers<C>) -> bool {
         if self.iocb.aio_nbytes <= written as u64 {
-            if let Some(task) = self.task.take() {
-                match task {
-                    IOEventTask::One(t) => {
-                        unsafe {
-                            (*t._event).set_ok();
-                        }
-                        if let Some(waker) = t.waker.as_ref() {
-                            waker.wake_by_ref();
-                        }
-                    }
-                    IOEventTask::Async(mut t) => {
-                        let event = t.event.take().unwrap();
-                        event.set_ok();
-                        cb.send(event);
-                    }
-                }
+            if let Some(event) = self.event.take() {
+                event.set_ok();
+                cb.send(event);
             }
             return true;
         }
@@ -348,8 +261,9 @@ impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
 
     #[inline(always)]
     pub(crate) fn set_error(&mut self, errno: i32, cb: &IOWorkers<C>) {
-        if let Some(task) = self.task.take() {
-            task.set_error(errno, Some(cb));
+        if let Some(event) = self.event.take() {
+            event.set_error(errno);
+            cb.send(event);
         }
     }
 }

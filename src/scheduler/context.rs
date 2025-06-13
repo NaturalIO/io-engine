@@ -23,16 +23,13 @@ SOFTWARE.
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
-    future::Future,
     io,
     mem::transmute,
     os::unix::io::RawFd,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
     thread,
 };
 
@@ -58,9 +55,9 @@ struct IOContextInner<C: IOCallbackCustom> {
     write_count: AtomicUsize,
     total_count: AtomicUsize,
     // shared by submitting worker and polling worker
-    prio_queue: SegQueue<IOEventTask<C>>,
-    read_queue: SegQueue<IOEventTask<C>>,
-    write_queue: SegQueue<IOEventTask<C>>,
+    prio_queue: SegQueue<Box<IOEvent<C>>>,
+    read_queue: SegQueue<Box<IOEvent<C>>>,
+    write_queue: SegQueue<Box<IOEvent<C>>>,
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
     running: AtomicBool,
     cb_workers: IOWorkers<C>,
@@ -142,49 +139,13 @@ impl<C: IOCallbackCustom> IOContext<C> {
         self.get_inner().depth
     }
 
-    #[inline]
-    pub async fn submit(&self, event: &IOEvent<C>) -> Result<(), io::Error> {
-        AIOFutureOne {
-            context: self,
-            sent: false,
-            event: &event,
-        }
-        .await
-    }
-
     #[inline(always)]
-    pub fn submit_async(
+    pub fn submit(
         &self,
         event: Box<IOEvent<C>>,
         channel_type: IOChannelType,
     ) -> Result<(), io::Error> {
-        let task = IOEventTask::new_async(event);
-        self._submit(task, channel_type);
-        Ok(())
-    }
-
-    #[inline(always)]
-    pub fn pending_count(&self) -> usize {
-        self.inner.total_count.load(Ordering::Acquire)
-    }
-
-    pub fn running_count(&self) -> usize {
-        let inner = self.get_inner();
-        let free = inner.free_slots_count.load(Ordering::SeqCst);
-        if free > inner.depth {
-            0
-        } else {
-            inner.depth - free
-        }
-    }
-
-    #[inline]
-    fn _submit(&self, event: IOEventTask<C>, channel_type: IOChannelType) {
         let inner = &self.get_inner();
-        if !inner.running.load(Ordering::Acquire) {
-            event.set_error(Errno::ESHUTDOWN as i32, None);
-            return;
-        }
         match channel_type {
             IOChannelType::Prio => {
                 let _ = inner.prio_count.fetch_add(1, Ordering::SeqCst);
@@ -201,6 +162,22 @@ impl<C: IOCallbackCustom> IOContext<C> {
         }
         inner.total_count.fetch_add(1, Ordering::SeqCst);
         let _ = self.noti_sender.try_send(());
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn pending_count(&self) -> usize {
+        self.inner.total_count.load(Ordering::Acquire)
+    }
+
+    pub fn running_count(&self) -> usize {
+        let inner = self.get_inner();
+        let free = inner.free_slots_count.load(Ordering::SeqCst);
+        if free > inner.depth {
+            0
+        } else {
+            inner.depth - free
+        }
     }
 
     #[inline(always)]
@@ -289,7 +266,7 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
 
     fn worker_submit(&self, noti_recv: Receiver<()>, free_recv: Receiver<u16>) {
         let depth = self.depth;
-        let mut events = VecDeque::<IOEventTask<C>>::with_capacity(depth);
+        let mut events = VecDeque::<Box<IOEvent<C>>>::with_capacity(depth);
         let mut iocbs = Vec::<*mut aio::iocb>::with_capacity(depth);
         let context = self.context;
         let slots: &mut Vec<IOEventTaskSlot<C>> = unsafe { transmute(self.slots.get()) };
@@ -414,29 +391,5 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
             }
             iocbs.clear();
         }
-    }
-}
-
-pub struct AIOFutureOne<'a, C: IOCallbackCustom> {
-    context: &'a IOContext<C>,
-    sent: bool,
-    event: &'a IOEvent<C>,
-}
-
-impl<'a, C: IOCallbackCustom> Future for AIOFutureOne<'a, C> {
-    type Output = Result<(), io::Error>;
-
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
-        let mut _self = self.get_mut();
-        let context = _self.context;
-        if !_self.sent {
-            let task = IOEventTask::new_one(_self.event, ctx.waker().clone());
-            context._submit(task, IOChannelType::Prio);
-            _self.sent = true;
-        }
-        if _self.event.is_done() {
-            return Poll::Ready(Ok(()));
-        }
-        return Poll::Pending;
     }
 }

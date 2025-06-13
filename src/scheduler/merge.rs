@@ -182,7 +182,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
         if batch_len == 1 {
             let submit_event = self.buffer.take_one();
             trace!("mio: submit {:?} not merged", submit_event);
-            self.ctx.submit_async(submit_event, self.channel_type)?;
+            self.ctx.submit(submit_event, self.channel_type)?;
         } else {
             let (mut events, offset, size) = self.buffer.take();
             log_assert!(size > 0);
@@ -204,9 +204,9 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                             _offset += _size;
                         }
                     }
-                    let mut event = Box::new(IOEvent::<C>::new(buffer, self.action, offset));
+                    let mut event = IOEvent::<C>::new(buffer, self.action, offset);
                     event.set_subtasks(events);
-                    self.ctx.submit_async(event, self.channel_type)?;
+                    self.ctx.submit(event, self.channel_type)?;
                 }
                 Err(_) => {
                     // commit seperately
@@ -222,7 +222,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                             }
                         };
                         if let Some(_event) = event {
-                            if let Err(_e) = self.ctx.submit_async(_event, self.channel_type) {
+                            if let Err(_e) = self.ctx.submit(_event, self.channel_type) {
                                 e.replace(_e);
                             }
                         } else {
