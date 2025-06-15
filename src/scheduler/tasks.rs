@@ -116,6 +116,21 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
+    pub fn push_to_list(mut self: Box<Self>, events: &mut EmbeddedList) {
+        events.push_back(&mut self.node);
+        let _ = Box::leak(self);
+    }
+
+    #[inline(always)]
+    pub fn pop_from_list(events: &mut EmbeddedList) -> Option<Box<Self>> {
+        if let Some(event) = events.pop_front::<Self>() {
+            Some(unsafe { Box::from_raw(event) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
     pub(crate) fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
         self.sub_tasks = Some(sub_tasks)
     }
@@ -190,8 +205,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
                     if self.action == IOAction::Read {
                         let mut offset: usize = 0;
                         let b = buffer.as_ref();
-                        for _event in tasks.drain::<Self>() {
-                            let mut event = unsafe { Box::from_raw(_event) };
+                        while let Some(mut event) = Self::pop_from_list(&mut tasks) {
                             let sub_buf = event.buf.as_mut().unwrap();
                             let sub_size = sub_buf.len();
                             sub_buf.copy_from(0, &b[offset..offset + sub_size]);
@@ -200,16 +214,14 @@ impl<C: IOCallbackCustom> IOEvent<C> {
                             event.callback();
                         }
                     } else {
-                        for _event in tasks.drain::<Self>() {
-                            let event = unsafe { Box::from_raw(_event) };
+                        while let Some(event) = Self::pop_from_list(&mut tasks) {
                             event.set_ok();
                             event.callback();
                         }
                     }
                 }
                 Err(errno) => {
-                    for _event in tasks.drain::<Self>() {
-                        let event = unsafe { Box::from_raw(_event) };
+                    while let Some(event) = Self::pop_from_list(&mut tasks) {
                         event.set_error(errno);
                         event.callback();
                     }

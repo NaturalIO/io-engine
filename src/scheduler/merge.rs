@@ -69,7 +69,7 @@ impl<C: IOCallbackCustom> EventMergeBuffer<C> {
 
     // return full
     #[inline(always)]
-    pub fn push_event(&mut self, mut event: Box<IOEvent<C>>) -> bool {
+    pub fn push_event(&mut self, event: Box<IOEvent<C>>) -> bool {
         if self.merged_count == 0 {
             self.merged_offset = event.offset;
             self.merged_data_size = event.get_size();
@@ -79,17 +79,14 @@ impl<C: IOCallbackCustom> EventMergeBuffer<C> {
         } else {
             self.merged_data_size += event.get_size();
             if self.merged_count == 1 {
-                let mut last_event = self.last_event.take().unwrap();
+                let last_event = self.last_event.take().unwrap();
                 let mut list = EmbeddedList::new(self.list_node_offset);
-                list.push_back(&mut last_event.node);
-                let _ = Box::leak(last_event);
-                list.push_back(&mut event.node);
-                let _ = Box::leak(event);
+                last_event.push_to_list(&mut list);
+                event.push_to_list(&mut list);
                 self.merged_events = Some(list);
             } else {
                 let merged_events = self.merged_events.as_mut().unwrap();
-                merged_events.push_back(&mut event.node);
-                let _ = Box::leak(event);
+                event.push_to_list(merged_events);
             }
             self.merged_count += 1;
             return self.merged_data_size >= self.merge_size_limit;
@@ -221,21 +218,9 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                     // commit seperately
                     warn!("mio: alloc buffer size {} failed", size);
                     let mut e: Option<io::Error> = None;
-                    loop {
-                        let event = {
-                            // to mask raw pointer from async scope
-                            if let Some(_event) = events.pop_front::<IOEvent<C>>() {
-                                Some(unsafe { Box::from_raw(_event) })
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(_event) = event {
-                            if let Err(_e) = self.ctx.submit(_event, self.channel_type) {
-                                e.replace(_e);
-                            }
-                        } else {
-                            break;
+                    while let Some(event) = IOEvent::<C>::pop_from_list(&mut events) {
+                        if let Err(_e) = self.ctx.submit(event, self.channel_type) {
+                            e.replace(_e);
                         }
                     }
                     if let Some(_e) = e {
