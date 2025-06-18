@@ -12,7 +12,7 @@ Library for block-based IO, intend to mask AIO/io_uring underneath.
 """
 
 [dependencies]
-rand = "0"
+rand = "0.9"
 fail = "0"
 libc = "0"
 nix = "0"
