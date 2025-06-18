@@ -1,8 +1,11 @@
 mod large;
 mod utils;
 use large::{BufferLarge, MIN_ALIGN};
-pub mod lz4;
+
 pub use utils::*;
+
+#[cfg(feature = "compress")]
+pub mod lz4;
 
 #[cfg(test)]
 mod test;

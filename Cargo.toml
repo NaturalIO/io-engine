@@ -28,3 +28,7 @@ getrandom = "0.1"
 md5 = "0"
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread"] }
 atomic-waitgroup = "0"
+
+[features]
+default = []
+compress = []
