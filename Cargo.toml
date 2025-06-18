@@ -21,6 +21,7 @@ io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0.3"
 crossbeam = "0.8"
+lz4-sys="1.8.3"
 
 [dev-dependencies]
 getrandom = "0.1"
