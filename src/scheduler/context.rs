@@ -129,10 +129,7 @@ impl<C: IOCallbackCustom> IOContext<C> {
             let th = thread::spawn(move || inner2.worker_poll(sender_free));
             threads.push(th);
         }
-        Ok(Arc::new(Self {
-            inner,
-            noti_sender: s_noti,
-        }))
+        Ok(Arc::new(Self { inner, noti_sender: s_noti }))
     }
 
     #[inline]
@@ -142,9 +139,7 @@ impl<C: IOCallbackCustom> IOContext<C> {
 
     #[inline(always)]
     pub fn submit(
-        &self,
-        event: Box<IOEvent<C>>,
-        channel_type: IOChannelType,
+        &self, event: Box<IOEvent<C>>, channel_type: IOChannelType,
     ) -> Result<(), io::Error> {
         let inner = &self.get_inner();
         match channel_type {
@@ -174,11 +169,7 @@ impl<C: IOCallbackCustom> IOContext<C> {
     pub fn running_count(&self) -> usize {
         let inner = self.get_inner();
         let free = inner.free_slots_count.load(Ordering::SeqCst);
-        if free > inner.depth {
-            0
-        } else {
-            inner.depth - free
-        }
+        if free > inner.depth { 0 } else { inner.depth - free }
     }
 
     #[inline(always)]
@@ -220,10 +211,7 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
         let mut infos = Vec::<aio::io_event>::with_capacity(depth);
         let context = self.context;
         let slots: &mut Vec<IOEventTaskSlot<C>> = unsafe { transmute(self.slots.get()) };
-        let ts = aio::timespec {
-            tv_sec: 2,
-            tv_nsec: 0,
-        };
+        let ts = aio::timespec { tv_sec: 2, tv_nsec: 0 };
         loop {
             infos.clear();
             let result = aio::io_getevents(context, 1, depth as i64, infos.as_mut_ptr(), unsafe {
@@ -248,9 +236,7 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
                 }
                 continue;
             }
-            let _ = self
-                .free_slots_count
-                .fetch_add(result as usize, Ordering::SeqCst);
+            let _ = self.free_slots_count.fetch_add(result as usize, Ordering::SeqCst);
             unsafe {
                 infos.set_len(result as usize);
             }

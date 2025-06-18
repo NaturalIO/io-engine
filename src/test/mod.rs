@@ -70,11 +70,7 @@ pub fn create_temp_file(path: &path::Path) -> OwnedFd {
             libc::O_DIRECT | libc::O_RDWR | libc::O_CREAT,
         );
         if fd < 0 {
-            panic!(
-                "create file {} errno={}",
-                path.display(),
-                nix::errno::Errno::last_raw()
-            );
+            panic!("create file {} errno={}", path.display(), nix::errno::Errno::last_raw());
         }
         fd
     })

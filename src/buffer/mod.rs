@@ -172,11 +172,7 @@ impl Buffer {
 
 impl Into<Vec<u8>> for Buffer {
     fn into(self) -> Vec<u8> {
-        if let Buffer::Vec(v) = self {
-            v
-        } else {
-            unimplemented!()
-        }
+        if let Buffer::Vec(v) = self { v } else { unimplemented!() }
     }
 }
 

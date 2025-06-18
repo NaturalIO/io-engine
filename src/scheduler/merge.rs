@@ -133,10 +133,7 @@ pub struct IOMergeSubmitter<C: IOCallbackCustom> {
 
 impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
     pub fn new(
-        fd: RawFd,
-        ctx: Arc<IOContext<C>>,
-        merge_size_limit: usize,
-        action: IOAction,
+        fd: RawFd, ctx: Arc<IOContext<C>>, merge_size_limit: usize, action: IOAction,
         channel_type: IOChannelType,
     ) -> Self {
         log_assert!(merge_size_limit > 0);
@@ -148,13 +145,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                 assert!(channel_type != IOChannelType::Read);
             }
         }
-        Self {
-            fd,
-            buffer: EventMergeBuffer::new(merge_size_limit),
-            ctx,
-            action,
-            channel_type,
-        }
+        Self { fd, buffer: EventMergeBuffer::new(merge_size_limit), ctx, action, channel_type }
     }
 
     /// On debug mode, will validate event.fd and event.action.
@@ -194,12 +185,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
             log_assert!(size > 0);
             match Buffer::aligned(size) {
                 Ok(mut buffer) => {
-                    trace!(
-                        "mio: merged {} ev into {} @{}",
-                        events.get_length(),
-                        size,
-                        offset
-                    );
+                    trace!("mio: merged {} ev into {} @{}", events.get_length(), size, offset);
                     if self.action == IOAction::Write {
                         let mut _offset = 0;
                         for _event in events.iter::<IOEvent<C>>() {

@@ -62,20 +62,8 @@ pub fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_lo
 // See [io_getevents(7)](http://man7.org/linux/man-pages/man2/io_getevents.2.html) for details.
 #[inline(always)]
 pub fn io_getevents(
-    ctx: aio_context_t,
-    min_nr: c_long,
-    max_nr: c_long,
-    events: *mut io_event,
+    ctx: aio_context_t, min_nr: c_long, max_nr: c_long, events: *mut io_event,
     timeout: *mut timespec,
 ) -> c_long {
-    unsafe {
-        syscall(
-            __NR_io_getevents as c_long,
-            ctx,
-            min_nr,
-            max_nr,
-            events,
-            timeout,
-        )
-    }
+    unsafe { syscall(__NR_io_getevents as c_long, ctx, min_nr, max_nr, events, timeout) }
 }

@@ -86,12 +86,7 @@ impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
 impl<C: IOCallbackCustom> IOEvent<C> {
     #[inline]
     pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
-        log_assert!(
-            buf.len() > 0,
-            "{:?} offset={}, buffer size == 0",
-            action,
-            offset
-        );
+        log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);
         Box::new(Self {
             buf: Some(buf),
             fd,
@@ -241,11 +236,7 @@ pub(crate) struct IOEventTaskSlot<C: IOCallbackCustom> {
 impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
     pub(crate) fn new(slot_id: u64) -> Self {
         Self {
-            iocb: aio::iocb {
-                aio_data: slot_id,
-                aio_reqprio: 1,
-                ..Default::default()
-            },
+            iocb: aio::iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() },
             event: None,
         }
     }

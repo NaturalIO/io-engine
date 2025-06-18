@@ -12,11 +12,7 @@ unsafe impl Send for EmbeddedListNode {}
 impl Default for EmbeddedListNode {
     #[inline(always)]
     fn default() -> Self {
-        Self {
-            prev: null_mut(),
-            next: null_mut(),
-            l: null_mut(),
-        }
+        Self { prev: null_mut(), next: null_mut(), l: null_mut() }
     }
 }
 
@@ -72,12 +68,7 @@ impl fmt::Debug for EmbeddedList {
 impl EmbeddedList {
     #[inline(always)]
     pub fn new(node_offset: usize) -> Self {
-        EmbeddedList {
-            length: 0,
-            head: null_mut(),
-            tail: null_mut(),
-            node_offset,
-        }
+        EmbeddedList { length: 0, head: null_mut(), tail: null_mut(), node_offset }
     }
 
     #[inline]
@@ -284,19 +275,12 @@ impl EmbeddedList {
     // NOTE: If you plan on turn the raw pointer to owned, use drain instead
     #[inline(always)]
     pub fn iter<'a, T>(&'a self) -> EmbeddedListIterator<'a, T> {
-        EmbeddedListIterator {
-            list: self,
-            cur: null_mut(),
-            phan: Default::default(),
-        }
+        EmbeddedListIterator { list: self, cur: null_mut(), phan: Default::default() }
     }
 
     #[inline(always)]
     pub fn drain<'a, T>(&'a mut self) -> EmbeddedListDrainer<'a, T> {
-        EmbeddedListDrainer {
-            list: self,
-            phan: Default::default(),
-        }
+        EmbeddedListDrainer { list: self, phan: Default::default() }
     }
 }
 
@@ -373,10 +357,7 @@ mod tests {
     type IntLinkList = EmbeddedList;
 
     fn new_intnode(i: i64) -> Box<IntListNode> {
-        Box::new(IntListNode {
-            node: EmbeddedListNode::default(),
-            value: i,
-        })
+        Box::new(IntListNode { node: EmbeddedListNode::default(), value: i })
     }
 
     fn new_intlist() -> IntLinkList {

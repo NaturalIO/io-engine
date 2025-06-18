@@ -42,12 +42,7 @@ impl BufferLarge {
                 return Err(Errno::ENOMEM);
             }
         }
-        Ok(Self {
-            buf_ptr: ptr,
-            size: size as u32,
-            owned: true,
-            mutable: true,
-        })
+        Ok(Self { buf_ptr: ptr, size: size as u32, owned: true, mutable: true })
     }
 
     /// Wrap a mutable buffer passed from c code, without owner ship.
@@ -56,12 +51,7 @@ impl BufferLarge {
     #[inline]
     pub fn from_c_ref_mut(ptr: *mut libc::c_void, size: usize) -> Self {
         assert!(ptr != std::ptr::null_mut());
-        Self {
-            buf_ptr: ptr,
-            size: size as u32,
-            owned: false,
-            mutable: true,
-        }
+        Self { buf_ptr: ptr, size: size as u32, owned: false, mutable: true }
     }
 
     /// Wrap a const buffer passed from c code, without owner ship.

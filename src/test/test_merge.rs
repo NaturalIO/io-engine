@@ -31,16 +31,10 @@ fn test_merged_submit() {
 }
 
 fn _test_merge_submit(
-    fd: RawFd,
-    ctx: Arc<IOContext<ClosureCb>>,
-    io_size: usize,
-    batch_num: usize,
+    fd: RawFd, ctx: Arc<IOContext<ClosureCb>>, io_size: usize, batch_num: usize,
     merge_size_limit: usize,
 ) {
-    println!(
-        "test_merged_submit {} {} {}",
-        io_size, batch_num, merge_size_limit
-    );
+    println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
     let mut m_write = IOMergeSubmitter::new(
         fd,
         ctx.clone(),
@@ -49,11 +43,8 @@ fn _test_merge_submit(
         IOChannelType::Write,
     );
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(4)
-        .build()
-        .unwrap();
+    let rt =
+        tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(4).build().unwrap();
 
     let mut buf_all = Vec::<u8>::with_capacity(batch_num * io_size);
     buf_all.resize_with(batch_num * io_size, || rand::random::<u8>());
@@ -117,20 +108,18 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(
-                move |mut _event: Box<IOEvent<ClosureCb>>| {
-                    let mut _buf_all = _read_buf.lock().unwrap();
-                    match _event.get_result() {
-                        Ok(buffer) => {
-                            _buf_all.copy_from(offset, buffer.as_ref());
-                        }
-                        Err(e) => {
-                            panic!("read error: {}", e);
-                        }
+            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+                let mut _buf_all = _read_buf.lock().unwrap();
+                match _event.get_result() {
+                    Ok(buffer) => {
+                        _buf_all.copy_from(offset, buffer.as_ref());
                     }
-                    _wg.done();
-                },
-            )));
+                    Err(e) => {
+                        panic!("read error: {}", e);
+                    }
+                }
+                _wg.done();
+            })));
             wg.add(1);
             m_read.add_event(event).expect("add_event");
         }
@@ -143,20 +132,18 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(
-                move |mut _event: Box<IOEvent<ClosureCb>>| {
-                    let mut _buf_all = _read_buf.lock().unwrap();
-                    match _event.get_result() {
-                        Ok(buffer) => {
-                            _buf_all.copy_from(offset, buffer.as_ref());
-                        }
-                        Err(e) => {
-                            panic!("read error: {}", e);
-                        }
+            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+                let mut _buf_all = _read_buf.lock().unwrap();
+                match _event.get_result() {
+                    Ok(buffer) => {
+                        _buf_all.copy_from(offset, buffer.as_ref());
                     }
-                    _wg.done();
-                },
-            )));
+                    Err(e) => {
+                        panic!("read error: {}", e);
+                    }
+                }
+                _wg.done();
+            })));
             wg.add(1);
             m_read.add_event(event).expect("add_event");
         }
@@ -168,20 +155,18 @@ fn _test_merge_submit(
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(
-                move |mut _event: Box<IOEvent<ClosureCb>>| {
-                    let mut _buf_all = _read_buf.lock().unwrap();
-                    match _event.get_result() {
-                        Ok(buffer) => {
-                            _buf_all.copy_from(offset, buffer.as_ref());
-                        }
-                        Err(e) => {
-                            panic!("read error: {}", e);
-                        }
+            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+                let mut _buf_all = _read_buf.lock().unwrap();
+                match _event.get_result() {
+                    Ok(buffer) => {
+                        _buf_all.copy_from(offset, buffer.as_ref());
                     }
-                    _wg.done();
-                },
-            )));
+                    Err(e) => {
+                        panic!("read error: {}", e);
+                    }
+                }
+                _wg.done();
+            })));
             wg.add(1);
             m_read.add_event(event).expect("add_event");
         }
