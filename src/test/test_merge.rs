@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 
-use crate::buffer::Buffer;
 use crate::test::*;
 use atomic_waitgroup::WaitGroup;
+use io_buffer::Buffer;
 
 #[test]
 fn test_merged_submit() {

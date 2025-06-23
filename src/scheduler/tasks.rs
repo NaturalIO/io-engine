@@ -30,7 +30,7 @@ use nix::errno::Errno;
 
 use super::embedded_list::*;
 use super::{aio, callback_worker::*};
-use crate::buffer::Buffer;
+use io_buffer::Buffer;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum IOAction {

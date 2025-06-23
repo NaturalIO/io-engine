@@ -30,7 +30,7 @@ use super::{
     context::{IOChannelType, IOContext},
     tasks::*,
 };
-use crate::buffer::Buffer;
+use io_buffer::Buffer;
 
 pub struct EventMergeBuffer<C: IOCallbackCustom> {
     pub merge_size_limit: usize,

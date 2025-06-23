@@ -1,6 +1,7 @@
 use crate::scheduler::*;
-use crate::{buffer::*, test::*};
+use crate::test::*;
 use crossbeam::channel::unbounded;
+use io_buffer::{Buffer, rand_buffer};
 use nix::errno::Errno;
 extern crate md5;
 

@@ -1,5 +1,5 @@
-use crate::buffer::Buffer;
 use crate::scheduler::*;
+use io_buffer::Buffer;
 use nix::errno::Errno;
 use std::sync::Arc;
 

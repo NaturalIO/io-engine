@@ -40,8 +40,7 @@ pub fn make_temp_file() -> TempDevFile {
 
 pub fn setup_log() {
     use captains_log::recipe::stderr_logger;
-    let mut log_config = stderr_logger(log::Level::Debug);
-    log_config.dynamic = true;
+    let log_config = stderr_logger(log::Level::Debug).test();
     log_config.build().expect("setup_log");
 }
 
