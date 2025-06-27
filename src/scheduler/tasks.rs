@@ -52,7 +52,7 @@ impl IOCallbackCustom for ClosureCb {
     }
 }
 
-// Carries the infomation of read/write event
+// Carries the information of read/write event
 #[repr(C)]
 pub struct IOEvent<C: IOCallbackCustom> {
     /// make sure EmbeddedListNode always in the front.

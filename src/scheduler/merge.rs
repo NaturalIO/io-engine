@@ -201,7 +201,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                     self.ctx.submit(event, self.channel_type)?;
                 }
                 Err(_) => {
-                    // commit seperately
+                    // commit separately
                     warn!("mio: alloc buffer size {} failed", size);
                     let mut e: Option<io::Error> = None;
                     while let Some(event) = IOEvent::<C>::pop_from_list(&mut events) {

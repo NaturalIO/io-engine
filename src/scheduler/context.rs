@@ -351,7 +351,7 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
                     let _ = self.free_slots_count.fetch_sub(left, Ordering::SeqCst);
                     let result = unsafe {
                         let arr = iocbs.as_mut_ptr().add(done as usize);
-                        //trace!("io_submiting done {} left {}", done, left);
+                        //trace!("io_submitting done {} left {}", done, left);
                         aio::io_submit(context, left as libc::c_long, arr)
                     };
                     if result < 0 {
