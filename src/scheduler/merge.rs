@@ -183,7 +183,7 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
         } else {
             let (mut events, offset, size) = self.buffer.take();
             log_assert!(size > 0);
-            match Buffer::aligned(size) {
+            match Buffer::aligned(size as i32) {
                 Ok(mut buffer) => {
                     trace!("mio: merged {} ev into {} @{}", events.get_length(), size, offset);
                     if self.action == IOAction::Write {
