@@ -286,23 +286,23 @@ impl<C: IOCallbackCustom> IOContextInner<C> {
                         }
                     };
                 }
-                if self.prio_count.load(Ordering::Acquire) > 0 {
+                if self.prio_count.load(Ordering::SeqCst) > 0 {
                     probe_queue!(self.prio_queue, self.prio_count);
                 }
                 if last_write {
                     last_write = false;
-                    if self.read_count.load(Ordering::Acquire) > 0 {
+                    if self.read_count.load(Ordering::SeqCst) > 0 {
                         probe_queue!(self.read_queue, self.read_count);
                     }
-                    if self.write_count.load(Ordering::Acquire) > 0 {
+                    if self.write_count.load(Ordering::SeqCst) > 0 {
                         probe_queue!(self.write_queue, self.write_count);
                     }
                 } else {
                     last_write = true;
-                    if self.write_count.load(Ordering::Acquire) > 0 {
+                    if self.write_count.load(Ordering::SeqCst) > 0 {
                         probe_queue!(self.write_queue, self.write_count);
                     }
-                    if self.read_count.load(Ordering::Acquire) > 0 {
+                    if self.read_count.load(Ordering::SeqCst) > 0 {
                         probe_queue!(self.read_queue, self.read_count);
                     }
                 }
