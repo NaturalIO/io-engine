@@ -60,10 +60,13 @@ impl<C: IOCallbackCustom> AioSlot<C> {
     }
 }
 
-struct ThreadSafeSlots<C: IOCallbackCustom>(UnsafeCell<Vec<AioSlot<C>>>);
+struct AioInner<C: IOCallbackCustom> {
+    context: aio_context_t,
+    slots: UnsafeCell<Vec<AioSlot<C>>>,
+}
 
-unsafe impl<C: IOCallbackCustom> Send for ThreadSafeSlots<C> {}
-unsafe impl<C: IOCallbackCustom> Sync for ThreadSafeSlots<C> {}
+unsafe impl<C: IOCallbackCustom> Send for AioInner<C> {}
+unsafe impl<C: IOCallbackCustom> Sync for AioInner<C> {}
 
 pub struct AioDriver;
 
@@ -72,8 +75,8 @@ impl AioDriver {
         ctx: Arc<IoSharedContext<C>>, _s_noti: Sender<()>, r_noti: Receiver<()>,
     ) -> io::Result<()> {
         let depth = ctx.depth;
-        let mut context: aio_context_t = 0;
-        if io_setup(depth as c_long, &mut context) != 0 {
+        let mut aio_context: aio_context_t = 0;
+        if io_setup(depth as c_long, &mut aio_context) != 0 {
             return Err(io::Error::last_os_error());
         }
 
@@ -81,8 +84,8 @@ impl AioDriver {
         for slot_id in 0..depth {
             slots.push(AioSlot::new(slot_id as u64));
         }
-        // shared slots
-        let slots = Arc::new(ThreadSafeSlots(UnsafeCell::new(slots)));
+
+        let inner = Arc::new(AioInner { context: aio_context, slots: UnsafeCell::new(slots) });
 
         let (s_free, r_free) = bounded::<u16>(depth);
         for i in 0..depth {
@@ -90,13 +93,13 @@ impl AioDriver {
         }
 
         let ctx_submit = ctx.clone();
-        let slots_submit = slots.clone();
-        thread::spawn(move || worker_submit(ctx_submit, context, slots_submit, r_noti, r_free));
+        let inner_submit = inner.clone();
+        thread::spawn(move || worker_submit(ctx_submit, inner_submit, r_noti, r_free));
 
         let ctx_poll = ctx.clone();
-        let slots_poll = slots.clone();
+        let inner_poll = inner.clone();
         let s_free_poll = s_free.clone();
-        thread::spawn(move || worker_poll(ctx_poll, context, slots_poll, s_free_poll));
+        thread::spawn(move || worker_poll(ctx_poll, inner_poll, s_free_poll));
 
         Ok(())
     }
@@ -127,12 +130,13 @@ impl<'a, C: IOCallbackCustom> SlotCollection<C> for AioSlotCollection<'a, C> {
 }
 
 fn worker_submit<C: IOCallbackCustom>(
-    ctx: Arc<IoSharedContext<C>>, context: aio_context_t, slots: Arc<ThreadSafeSlots<C>>,
-    noti_recv: Receiver<()>, free_recv: Receiver<u16>,
+    ctx: Arc<IoSharedContext<C>>, inner: Arc<AioInner<C>>, noti_recv: Receiver<()>,
+    free_recv: Receiver<u16>,
 ) {
     let depth = ctx.depth;
     let mut iocbs = Vec::<*mut iocb>::with_capacity(depth);
-    let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(slots.0.get()) };
+    let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
+    let aio_context = inner.context;
     let mut last_write: bool = false;
 
     'outer: loop {
@@ -157,7 +161,7 @@ fn worker_submit<C: IOCallbackCustom>(
                 let _ = ctx.free_slots_count.fetch_sub(left, Ordering::SeqCst);
                 let result = unsafe {
                     let arr = iocbs.as_mut_ptr().add(done as usize);
-                    io_submit(context, left as libc::c_long, arr)
+                    io_submit(aio_context, left as libc::c_long, arr)
                 };
                 if result < 0 {
                     let _ = ctx.free_slots_count.fetch_add(left, Ordering::SeqCst); // submit failed add back
@@ -186,16 +190,16 @@ fn worker_submit<C: IOCallbackCustom>(
 }
 
 fn worker_poll<C: IOCallbackCustom>(
-    ctx: Arc<IoSharedContext<C>>, context: aio_context_t, slots: Arc<ThreadSafeSlots<C>>,
-    free_sender: Sender<u16>,
+    ctx: Arc<IoSharedContext<C>>, inner: Arc<AioInner<C>>, free_sender: Sender<u16>,
 ) {
     let depth = ctx.depth;
     let mut infos = Vec::<io_event>::with_capacity(depth);
-    let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(slots.0.get()) };
+    let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
+    let aio_context = inner.context;
     let ts = timespec { tv_sec: 2, tv_nsec: 0 };
     loop {
         infos.clear();
-        let result = io_getevents(context, 1, depth as i64, infos.as_mut_ptr(), unsafe {
+        let result = io_getevents(aio_context, 1, depth as i64, infos.as_mut_ptr(), unsafe {
             std::mem::transmute::<&timespec, *mut timespec>(&ts)
         });
         if result < 0 {
@@ -223,13 +227,13 @@ fn worker_poll<C: IOCallbackCustom>(
         }
         for ref info in &infos {
             let slot_id = (*info).data as usize;
-            if verify_result(&ctx, context, &mut slots_ref[slot_id], info) {
+            if verify_result(&ctx, aio_context, &mut slots_ref[slot_id], info) {
                 let _ = free_sender.send(slot_id as u16);
             }
         }
     }
     info!("io_poll worker exit due to closing");
-    let _ = io_destroy(context);
+    let _ = io_destroy(aio_context);
 }
 
 #[inline(always)]
