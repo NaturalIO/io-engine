@@ -1,4 +1,6 @@
-use crate::scheduler::*;
+use crate::callback_worker::IOWorkers;
+use crate::scheduler::context::{IOChannelType, IOContext};
+use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossbeam::channel::unbounded;
 use io_buffer::{Buffer, rand_buffer};

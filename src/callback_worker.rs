@@ -1,6 +1,6 @@
 use crossbeam::channel::{Sender, bounded};
 
-use super::{IOCallbackCustom, IOEvent};
+use crate::tasks::{IOCallbackCustom, IOEvent};
 
 pub struct IOWorkers<C: IOCallbackCustom>(pub(crate) Sender<Box<IOEvent<C>>>);
 

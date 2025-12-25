@@ -20,16 +20,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-use super::embedded_list::*;
+use crate::embedded_list::*;
 use std::io;
 use std::mem::transmute;
 use std::os::fd::RawFd;
 use std::sync::Arc;
 
-use super::{
-    context::{IOChannelType, IOContext},
-    tasks::*,
-};
+use crate::scheduler::context::{IOChannelType, IOContext};
+use crate::tasks::*;
 use io_buffer::Buffer;
 
 pub struct EventMergeBuffer<C: IOCallbackCustom> {
