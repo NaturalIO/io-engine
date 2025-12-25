@@ -262,12 +262,12 @@ fn verify_result<C: IOCallbackCustom>(
 }
 
 // Relevant symbols from the native bindings exposed via aio-bindings
-pub use io_engine_aio_bindings::{
+use io_engine_aio_bindings::{
     __NR_io_destroy, __NR_io_getevents, __NR_io_setup, __NR_io_submit, IOCB_CMD_FDSYNC,
     IOCB_CMD_FSYNC, IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_FLAG_RESFD, RWF_DSYNC, RWF_SYNC,
     aio_context_t, io_event, iocb, syscall, timespec,
 };
-pub use libc::c_long;
+use libc::c_long;
 
 // -----------------------------------------------------------------------------------------------
 // Inline functions that wrap the kernel calls for the entry points corresponding to Linux
@@ -278,7 +278,7 @@ pub use libc::c_long;
 //
 // See [io_setup(7)](http://man7.org/linux/man-pages/man2/io_setup.2.html) for details.
 #[inline(always)]
-pub fn io_setup(nr: c_long, ctxp: *mut aio_context_t) -> c_long {
+fn io_setup(nr: c_long, ctxp: *mut aio_context_t) -> c_long {
     unsafe { syscall(__NR_io_setup as c_long, nr, ctxp) }
 }
 
@@ -286,7 +286,7 @@ pub fn io_setup(nr: c_long, ctxp: *mut aio_context_t) -> c_long {
 //
 // See [io_destroy(7)](http://man7.org/linux/man-pages/man2/io_destroy.2.html) for details.
 #[inline(always)]
-pub fn io_destroy(ctx: aio_context_t) -> c_long {
+fn io_destroy(ctx: aio_context_t) -> c_long {
     unsafe { syscall(__NR_io_destroy as c_long, ctx) }
 }
 
@@ -294,7 +294,7 @@ pub fn io_destroy(ctx: aio_context_t) -> c_long {
 //
 // See [io_sumit(7)](http://man7.org/linux/man-pages/man2/io_submit.2.html) for details.
 #[inline(always)]
-pub fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_long {
+fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_long {
     unsafe { syscall(__NR_io_submit as c_long, ctx, nr, iocbpp) }
 }
 
@@ -302,7 +302,7 @@ pub fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_lo
 //
 // See [io_getevents(7)](http://man7.org/linux/man-pages/man2/io_getevents.2.html) for details.
 #[inline(always)]
-pub fn io_getevents(
+fn io_getevents(
     ctx: aio_context_t, min_nr: c_long, max_nr: c_long, events: *mut io_event,
     timeout: *mut timespec,
 ) -> c_long {
