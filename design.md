@@ -117,27 +117,80 @@ impl UringDriver {
 
 ### 2.4. 公共调度逻辑 (`src/scheduler/common.rs`)
 
-将原 `worker_submit` 中的队列处理逻辑提取出来。为了最大化性能并减少中间内存分配，我们使用泛型闭包来直接消费获取到的事件。
+
+
+将原 `worker_submit` 中的队列处理逻辑提取出来。为了最大化性能并减少中间内存分配，我们使用泛型 `SlotCollection` trait 来接收获取到的事件。
+
+
 
 ```rust
-/// 从多级队列中轮询任务
-/// 
-/// - `ctx`: 共享上下文
-/// - `quota`: 本次允许获取的最大任务数（通常等于当前 Submitter 手中的空闲 Slot 数量）
-/// - `consumer`: 泛型闭包，用于接收并处理 Event。
-///   Submitter 可以在此闭包中直接将 Event 填充到 Slot 中。
-pub fn poll_request_from_queues<C, F>(
-    ctx: &IoSharedContext<C>, 
-    quota: usize,
-    mut consumer: F
-) 
-where 
-    C: IOCallbackCustom,
-    F: FnMut(Box<IOEvent<C>>) {
-    // 实现原有的 EmbeddedList 遍历、优先级控制、Budget 逻辑
-    // 当找到 Event 时，直接调用 consumer(event)
-    // 内部维护配额计数，达到 quota 即停止
+
+pub trait SlotCollection<C: IOCallbackCustom> {
+
+    fn push(&mut self, event: Box<IOEvent<C>>);
+
 }
+
+
+
+// 为 Vec 实现 SlotCollection，方便测试和简单场景
+
+impl<C: IOCallbackCustom> SlotCollection<C> for Vec<Box<IOEvent<C>>> {
+
+    fn push(&mut self, event: Box<IOEvent<C>>) {
+
+        self.push(event);
+
+    }
+
+}
+
+
+
+/// 从多级队列中轮询任务
+
+/// 
+
+/// - `ctx`: 共享上下文
+
+/// - `quota`: 本次允许获取的最大任务数（通常等于当前 Submitter 手中的空闲 Slot 数量）
+
+/// - `slots`: 实现了 SlotCollection trait 的集合，用于接收 Event。
+
+///   Submitter 会传入一个适配器，将 event 直接填入 Driver 特定的 Slot 中。
+
+///
+
+/// 此函数内部封装了 EmbeddedList 遍历、优先级控制 (Priority/Read/Write queues) 
+
+/// 以及 Budget 控制的完整逻辑。
+
+pub fn poll_request_from_queues<C, I>(
+
+    ctx: &IoSharedContext<C>, 
+
+    quota: usize,
+
+    slots: &mut I
+
+) 
+
+where 
+
+    C: IOCallbackCustom,
+
+    I: SlotCollection<C>
+
+{
+
+    // 实现原有的 EmbeddedList 遍历、优先级控制、Budget 逻辑
+
+    // 当找到 Event 时，调用 slots.push(event)
+
+    // 内部维护配额计数，达到 quota 即停止
+
+}
+
 ```
 
 ### 2.5. 初始化流程
