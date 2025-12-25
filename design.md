@@ -123,9 +123,25 @@ impl UringDriver {
 
 
 
+**设计意图**：
+
+之所以要抽象 `SlotCollection`，是为了在 `push` 时**同步构建**后端所需的特定数据结构（如 AIO 的 `iocb` 或 io_uring 的 `SQE` 参数）。这样可以避免先收集 Event 再遍历转换的二次开销。
+
+
+
 ```rust
 
 pub trait SlotCollection<C: IOCallbackCustom> {
+
+    /// 接收一个 IOEvent 并将其填入当前的空闲 Slot 中。
+
+    /// 
+
+    /// 实现者应当在此方法中立即进行后端特定的准备工作：
+
+    /// - **AIO**: 填充对应的 `iocb` 结构体。
+
+    /// - **io_uring**: 准备 SQE 提交参数（或直接获取 SQE 填充）。
 
     fn push(&mut self, event: Box<IOEvent<C>>);
 
@@ -144,6 +160,8 @@ impl<C: IOCallbackCustom> SlotCollection<C> for Vec<Box<IOEvent<C>>> {
     }
 
 }
+
+
 
 
 
