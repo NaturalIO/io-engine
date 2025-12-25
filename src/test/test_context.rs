@@ -1,8 +1,11 @@
-use crate::scheduler::*;
+use crate::callback_worker::IOWorkers;
+use crate::context::IOContext;
+use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
-use crossbeam::channel::unbounded;
+use crossfire::BlockingTxTrait;
 use io_buffer::{Buffer, rand_buffer};
 use nix::errno::Errno;
+use std::sync::mpsc::channel as unbounded;
 extern crate md5;
 
 #[test]
@@ -11,7 +14,8 @@ fn test_read_write() {
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.fd;
-    let ctx = IOContext::<ClosureCb>::new(2, &IOWorkers::new(1)).unwrap();
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
+    let _ctx = IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1)).unwrap();
 
     let (done_tx, done_rx) = unbounded::<Box<IOEvent<ClosureCb>>>();
     let callback = Box::new(move |event: Box<IOEvent<ClosureCb>>| {
@@ -21,7 +25,7 @@ fn test_read_write() {
     // wrong offset
     let mut event = IOEvent::new(fd, buffer3, IOAction::Read, 100);
     event.set_callback(ClosureCb(callback.clone()));
-    ctx.submit(event, IOChannelType::Prio).expect("submit");
+    tx.send(event).expect("submit");
     let mut event = done_rx.recv().unwrap();
     assert!(event.is_done());
     match event.get_result() {
@@ -43,14 +47,14 @@ fn test_read_write() {
             let digest = md5::compute(&buffer);
             let mut event = IOEvent::new(fd, buffer, IOAction::Write, 4096 * i as i64);
             event.set_callback(ClosureCb(callback.clone()));
-            ctx.submit(event, IOChannelType::Write).expect("submit");
+            tx.send(event).expect("submit");
             let event = done_rx.recv().unwrap();
             assert!(event.is_done());
             // read
             let buffer2 = Buffer::aligned(4096).unwrap();
             let mut event = IOEvent::new(fd, buffer2, IOAction::Read, 4096 * i as i64);
             event.set_callback(ClosureCb(callback.clone()));
-            ctx.submit(event, IOChannelType::Read).expect("submit");
+            tx.send(event).expect("submit");
             let mut event = done_rx.recv().unwrap();
             assert!(event.is_done());
             match event.get_result() {

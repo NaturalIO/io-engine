@@ -1,4 +1,4 @@
-use crate::scheduler::*;
+use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use io_buffer::Buffer;
 use nix::errno::Errno;
 use std::sync::Arc;

@@ -1,38 +1,12 @@
-/*
-Copyright (c) NaturalIO Contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
-
-use super::embedded_list::*;
+use crate::embedded_list::*;
+use crate::tasks::*;
+use crossfire::BlockingTxTrait;
+use io_buffer::Buffer;
 use std::io;
 use std::mem::transmute;
 use std::os::fd::RawFd;
-use std::sync::Arc;
 
-use super::{
-    context::{IOChannelType, IOContext},
-    tasks::*,
-};
-use io_buffer::Buffer;
-
-pub struct EventMergeBuffer<C: IOCallbackCustom> {
+pub struct EventMergeBuffer<C: IoCallback> {
     pub merge_size_limit: usize,
     last_event: Option<Box<IOEvent<C>>>,
     merged_events: Option<EmbeddedList>,
@@ -42,7 +16,7 @@ pub struct EventMergeBuffer<C: IOCallbackCustom> {
     list_node_offset: usize,
 }
 
-impl<C: IOCallbackCustom> EventMergeBuffer<C> {
+impl<C: IoCallback> EventMergeBuffer<C> {
     pub fn new(merge_size_limit: usize) -> Self {
         Self {
             merge_size_limit,
@@ -123,29 +97,17 @@ impl<C: IOCallbackCustom> EventMergeBuffer<C> {
 /// Try to merge sequential IOEvent.
 ///
 /// NOTE: Assuming all the IOEvents are of the same file, only debug mode will do validation.
-pub struct IOMergeSubmitter<C: IOCallbackCustom> {
+pub struct IOMergeSubmitter<C: IoCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> {
     fd: RawFd,
     buffer: EventMergeBuffer<C>,
-    ctx: Arc<IOContext<C>>,
+    sender: S,
     action: IOAction,
-    channel_type: IOChannelType,
 }
 
-impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
-    pub fn new(
-        fd: RawFd, ctx: Arc<IOContext<C>>, merge_size_limit: usize, action: IOAction,
-        channel_type: IOChannelType,
-    ) -> Self {
+impl<C: IoCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> IOMergeSubmitter<C, S> {
+    pub fn new(fd: RawFd, sender: S, merge_size_limit: usize, action: IOAction) -> Self {
         log_assert!(merge_size_limit > 0);
-        match action {
-            IOAction::Read => {
-                assert_eq!(channel_type, IOChannelType::Read);
-            }
-            IOAction::Write => {
-                assert!(channel_type != IOChannelType::Read);
-            }
-        }
-        Self { fd, buffer: EventMergeBuffer::new(merge_size_limit), ctx, action, channel_type }
+        Self { fd, buffer: EventMergeBuffer::new(merge_size_limit), sender, action }
     }
 
     /// On debug mode, will validate event.fd and event.action.
@@ -179,7 +141,9 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
         if batch_len == 1 {
             let submit_event = self.buffer.take_one();
             trace!("mio: submit {:?} not merged", submit_event);
-            self.ctx.submit(submit_event, self.channel_type)?;
+            self.sender
+                .send(submit_event)
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Queue closed"))?;
         } else {
             let (mut events, offset, size) = self.buffer.take();
             log_assert!(size > 0);
@@ -198,14 +162,20 @@ impl<C: IOCallbackCustom> IOMergeSubmitter<C> {
                     }
                     let mut event = IOEvent::<C>::new(self.fd, buffer, self.action, offset);
                     event.set_subtasks(events);
-                    self.ctx.submit(event, self.channel_type)?;
+                    self.sender
+                        .send(event)
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "Queue closed"))?;
                 }
                 Err(_) => {
                     // commit separately
                     warn!("mio: alloc buffer size {} failed", size);
                     let mut e: Option<io::Error> = None;
                     while let Some(event) = IOEvent::<C>::pop_from_list(&mut events) {
-                        if let Err(_e) = self.ctx.submit(event, self.channel_type) {
+                        if let Err(_e) = self
+                            .sender
+                            .send(event)
+                            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Queue closed"))
+                        {
                             e.replace(_e);
                         }
                     }
