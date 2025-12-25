@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-use super::context::IoSharedContext;
+use crate::context::IoSharedContext;
 use crate::tasks::{IOCallbackCustom, IOEvent};
 use std::sync::atomic::Ordering;
 

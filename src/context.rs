@@ -33,9 +33,9 @@ use crossbeam::{
     queue::SegQueue,
 };
 
-use crate::tasks::{IOEvent, IOCallbackCustom};
 use crate::callback_worker::IOWorkers;
-use super::aio::AioDriver;
+use crate::driver::aio::AioDriver;
+use crate::tasks::{IOCallbackCustom, IOEvent};
 
 pub struct IoSharedContext<C: IOCallbackCustom> {
     pub depth: usize,
@@ -75,7 +75,7 @@ impl<C: IOCallbackCustom> Drop for IOContext<C> {
 impl<C: IOCallbackCustom> IOContext<C> {
     pub fn new(depth: usize, cbs: &IOWorkers<C>) -> Result<Arc<Self>, io::Error> {
         let (s_noti, r_noti) = bounded::<()>(1);
-        
+
         let inner = Arc::new(IoSharedContext {
             depth,
             running: AtomicBool::new(true),

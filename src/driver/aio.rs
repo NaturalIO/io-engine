@@ -68,8 +68,8 @@ pub fn io_getevents(
     unsafe { syscall(__NR_io_getevents as c_long, ctx, min_nr, max_nr, events, timeout) }
 }
 
-use crate::tasks::{IOEvent, IOCallbackCustom, IOAction};
 use crate::callback_worker::IOWorkers;
+use crate::tasks::{IOAction, IOCallbackCustom, IOEvent};
 
 pub struct AioSlot<C: IOCallbackCustom> {
     pub(crate) iocb: iocb,
@@ -78,10 +78,7 @@ pub struct AioSlot<C: IOCallbackCustom> {
 
 impl<C: IOCallbackCustom> AioSlot<C> {
     pub fn new(slot_id: u64) -> Self {
-        Self {
-            iocb: iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() },
-            event: None,
-        }
+        Self { iocb: iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() }, event: None }
     }
 
     #[inline(always)]
@@ -120,6 +117,10 @@ impl<C: IOCallbackCustom> AioSlot<C> {
     }
 }
 
+use crate::common::{SlotCollection, poll_request_from_queues};
+use crate::context::IoSharedContext;
+use crossbeam::channel::{Receiver, Sender, bounded};
+use nix::errno::Errno;
 use std::{
     cell::UnsafeCell,
     io,
@@ -127,10 +128,6 @@ use std::{
     sync::{Arc, atomic::Ordering},
     thread,
 };
-use crossbeam::channel::{Receiver, Sender, bounded};
-use nix::errno::Errno;
-use crate::scheduler::context::IoSharedContext;
-use crate::scheduler::common::{SlotCollection, poll_request_from_queues};
 
 struct ThreadSafeSlots<C: IOCallbackCustom>(UnsafeCell<Vec<AioSlot<C>>>);
 
@@ -141,9 +138,7 @@ pub struct AioDriver;
 
 impl AioDriver {
     pub fn start<C: IOCallbackCustom>(
-        ctx: Arc<IoSharedContext<C>>,
-        _s_noti: Sender<()>,
-        r_noti: Receiver<()>,
+        ctx: Arc<IoSharedContext<C>>, _s_noti: Sender<()>, r_noti: Receiver<()>,
     ) -> io::Result<()> {
         let depth = ctx.depth;
         let mut context: aio_context_t = 0;
@@ -165,17 +160,13 @@ impl AioDriver {
 
         let ctx_submit = ctx.clone();
         let slots_submit = slots.clone();
-        thread::spawn(move || {
-            worker_submit(ctx_submit, context, slots_submit, r_noti, r_free)
-        });
+        thread::spawn(move || worker_submit(ctx_submit, context, slots_submit, r_noti, r_free));
 
         let ctx_poll = ctx.clone();
         let slots_poll = slots.clone();
         let s_free_poll = s_free.clone();
-        thread::spawn(move || {
-            worker_poll(ctx_poll, context, slots_poll, s_free_poll)
-        });
-        
+        thread::spawn(move || worker_poll(ctx_poll, context, slots_poll, s_free_poll));
+
         Ok(())
     }
 }
@@ -194,7 +185,7 @@ impl<'a, C: IOCallbackCustom> SlotCollection<C> for AioSlotCollection<'a, C> {
         slot.fill_slot(event, slot_id);
         self.iocbs.push(&mut slot.iocb as *mut iocb);
     }
-    
+
     fn len(&self) -> usize {
         self.iocbs.len()
     }
@@ -205,11 +196,8 @@ impl<'a, C: IOCallbackCustom> SlotCollection<C> for AioSlotCollection<'a, C> {
 }
 
 fn worker_submit<C: IOCallbackCustom>(
-    ctx: Arc<IoSharedContext<C>>,
-    context: aio_context_t,
-    slots: Arc<ThreadSafeSlots<C>>,
-    noti_recv: Receiver<()>,
-    free_recv: Receiver<u16>,
+    ctx: Arc<IoSharedContext<C>>, context: aio_context_t, slots: Arc<ThreadSafeSlots<C>>,
+    noti_recv: Receiver<()>, free_recv: Receiver<u16>,
 ) {
     let depth = ctx.depth;
     let mut iocbs = Vec::<*mut iocb>::with_capacity(depth);
@@ -223,14 +211,11 @@ fn worker_submit<C: IOCallbackCustom>(
                 return;
             }
         }
-        
+
         // Fill batch
         {
-            let mut collection = AioSlotCollection {
-                slots: slots_ref,
-                iocbs: &mut iocbs,
-                free_recv: &free_recv,
-            };
+            let mut collection =
+                AioSlotCollection { slots: slots_ref, iocbs: &mut iocbs, free_recv: &free_recv };
             poll_request_from_queues(&ctx, depth, &mut collection, &mut last_write);
         }
 
@@ -269,7 +254,7 @@ fn worker_submit<C: IOCallbackCustom>(
                         // ...
                     }
                     */
-                    // It seems it would loop infinitely if result < 0 and not EINTR? 
+                    // It seems it would loop infinitely if result < 0 and not EINTR?
                     // Or effectively stuck.
                     // Let's assume it breaks or we should break.
                     break 'submit;
@@ -293,9 +278,7 @@ fn worker_submit<C: IOCallbackCustom>(
 }
 
 fn worker_poll<C: IOCallbackCustom>(
-    ctx: Arc<IoSharedContext<C>>,
-    context: aio_context_t,
-    slots: Arc<ThreadSafeSlots<C>>,
+    ctx: Arc<IoSharedContext<C>>, context: aio_context_t, slots: Arc<ThreadSafeSlots<C>>,
     free_sender: Sender<u16>,
 ) {
     let depth = ctx.depth;
@@ -343,10 +326,7 @@ fn worker_poll<C: IOCallbackCustom>(
 
 #[inline(always)]
 fn verify_result<C: IOCallbackCustom>(
-    ctx: &IoSharedContext<C>,
-    context: aio_context_t,
-    slot: &mut AioSlot<C>,
-    info: &io_event
+    ctx: &IoSharedContext<C>, context: aio_context_t, slot: &mut AioSlot<C>, info: &io_event,
 ) -> bool {
     if info.res <= 0 {
         slot.set_error((-info.res) as i32, &ctx.cb_workers);

@@ -1,5 +1,5 @@
 use crate::callback_worker::IOWorkers;
-use crate::scheduler::context::{IOChannelType, IOContext};
+use crate::context::{IOChannelType, IOContext};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossbeam::channel::unbounded;

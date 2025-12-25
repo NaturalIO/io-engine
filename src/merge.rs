@@ -26,7 +26,7 @@ use std::mem::transmute;
 use std::os::fd::RawFd;
 use std::sync::Arc;
 
-use crate::scheduler::context::{IOChannelType, IOContext};
+use crate::context::{IOChannelType, IOContext};
 use crate::tasks::*;
 use io_buffer::Buffer;
 

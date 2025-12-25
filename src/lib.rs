@@ -4,10 +4,12 @@ extern crate log;
 extern crate captains_log;
 
 pub mod callback_worker;
+pub mod common;
+pub mod context;
+pub mod driver;
 pub mod embedded_list;
 pub mod merge;
-pub mod scheduler;
-pub mod tasks; // Keep this for now, will contain context and aio/uring
+pub mod tasks;
 
 #[cfg(test)]
 extern crate rand;

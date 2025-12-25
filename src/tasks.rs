@@ -28,8 +28,8 @@ use std::{
 
 use nix::errno::Errno;
 
-use crate::embedded_list::*;
 use crate::callback_worker::*;
+use crate::embedded_list::*;
 use io_buffer::Buffer;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
