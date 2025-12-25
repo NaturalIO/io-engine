@@ -10,6 +10,7 @@ use std::{
     cell::UnsafeCell,
     io,
     mem::transmute,
+    os::fd::RawFd,
     sync::{Arc, atomic::Ordering},
     thread,
 };
@@ -34,6 +35,13 @@ impl<C: IOCallbackCustom> AioSlot<C> {
         iocb.aio_buf = buf.get_raw() as u64;
         iocb.aio_nbytes = buf.len() as u64;
         iocb.aio_offset = event.offset;
+
+        // Mark the IOCB if it's an exit signal
+        if event.is_exit_signal {
+            iocb.aio_flags |= IOCB_FLAG_IS_EXIT_SIGNAL as u32;
+        } else {
+            iocb.aio_flags &= !(IOCB_FLAG_IS_EXIT_SIGNAL as u32); // Clear if not an exit signal
+        }
         self.event.replace(event);
     }
 
@@ -63,12 +71,21 @@ impl<C: IOCallbackCustom> AioSlot<C> {
 struct AioInner<C: IOCallbackCustom> {
     context: aio_context_t,
     slots: UnsafeCell<Vec<AioSlot<C>>>,
+    exit_fd: RawFd, // File descriptor for /dev/null to signal exit
 }
 
 unsafe impl<C: IOCallbackCustom> Send for AioInner<C> {}
 unsafe impl<C: IOCallbackCustom> Sync for AioInner<C> {}
 
+impl<C: IOCallbackCustom> Drop for AioInner<C> {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::close(self.exit_fd) };
+    }
+}
+
 pub struct AioDriver;
+
+const IOCB_FLAG_IS_EXIT_SIGNAL: u32 = 0x8000_0000; // Custom flag for exit signal, using highest bit
 
 impl AioDriver {
     pub fn start<C: IOCallbackCustom>(
@@ -85,7 +102,17 @@ impl AioDriver {
             slots.push(AioSlot::new(slot_id as u64));
         }
 
-        let inner = Arc::new(AioInner { context: aio_context, slots: UnsafeCell::new(slots) });
+        // Open /dev/null for the exit signal
+        let exit_fd = unsafe { libc::open(b"/dev/null\0".as_ptr() as *const i8, libc::O_RDONLY) };
+        if exit_fd < 0 {
+            let err = io::Error::last_os_error();
+            // Destroy aio context if we fail to open /dev/null
+            let _ = io_destroy(aio_context);
+            return Err(err);
+        }
+
+        let inner =
+            Arc::new(AioInner { context: aio_context, slots: UnsafeCell::new(slots), exit_fd });
 
         let (s_free, r_free) = bounded::<u16>(depth);
         for i in 0..depth {
@@ -143,6 +170,18 @@ fn worker_submit<C: IOCallbackCustom>(
         if iocbs.len() == 0 && ctx.total_count.load(Ordering::Acquire) == 0 {
             if noti_recv.recv().is_err() {
                 info!("io_submit worker exit due to closing");
+                // Submit a zero-length read to signal poller to shut down
+                let exit_event = IOEvent::<C>::new_exit_signal(inner.exit_fd); // Use valid exit_fd
+                let slot_id = free_recv.recv().unwrap(); // Acquire a slot for the exit signal
+                slots_ref[slot_id as usize].fill_slot(exit_event, slot_id);
+
+                let mut arr: [*mut iocb; 1] = [&mut slots_ref[slot_id as usize].iocb as *mut iocb];
+                let result = unsafe { io_submit(aio_context, 1, arr.as_mut_ptr()) };
+                if result < 0 {
+                    error!("Failed to submit exit signal: {}", result);
+                }
+                ctx.free_slots_count.fetch_sub(1, Ordering::SeqCst); // Decrement count for the submitted exit signal
+                ctx.total_count.fetch_add(1, Ordering::SeqCst); // Increment total count for the exit signal event
                 return;
             }
         }
@@ -196,39 +235,61 @@ fn worker_poll<C: IOCallbackCustom>(
     let mut infos = Vec::<io_event>::with_capacity(depth);
     let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
     let aio_context = inner.context;
-    let ts = timespec { tv_sec: 2, tv_nsec: 0 };
+    // Use infinite timeout for io_getevents
+    let ts_inf = timespec { tv_sec: -1, tv_nsec: 0 };
+
     loop {
         infos.clear();
         let result = io_getevents(aio_context, 1, depth as i64, infos.as_mut_ptr(), unsafe {
-            std::mem::transmute::<&timespec, *mut timespec>(&ts)
+            std::mem::transmute::<&timespec, *mut timespec>(&ts_inf)
         });
         if result < 0 {
             if -result == Errno::EINTR as i64 {
                 continue;
             }
+            // If context is running and we get an error, it's a real error.
+            // If context is not running, we might be shutting down, so break.
             if !ctx.running.load(Ordering::Acquire) {
-                // device error and we are stopping
+                error!("io_getevents error during shutdown: {}", -result);
                 break;
             }
             error!("io_getevents errno: {}", -result);
             continue;
         } else if result == 0 {
             if !ctx.running.load(Ordering::Acquire) {
-                // wait for all submmited io return
+                // If running flag is false and no events, check if all slots are free.
+                // This branch is for when the exit signal is received, and we are draining.
                 if ctx.free_slots_count.load(Ordering::SeqCst) == ctx.depth {
+                    info!("io_poll worker exit gracefully after completing all IO during shutdown");
                     break;
                 }
             }
-            continue;
+            continue; // No events, continue blocking if not shutting down
         }
+
         let _ = ctx.free_slots_count.fetch_add(result as usize, Ordering::SeqCst);
         unsafe {
             infos.set_len(result as usize);
         }
-        for ref info in &infos {
+        for info in &infos {
             let slot_id = (*info).data as usize;
-            if verify_result(&ctx, aio_context, &mut slots_ref[slot_id], info) {
-                let _ = free_sender.send(slot_id as u16);
+            if verify_result_for_shutdown(
+                ctx.clone(),
+                aio_context,
+                &mut slots_ref[slot_id],
+                info,
+                free_sender.clone(),
+            ) {
+                // If verify_result_for_shutdown returns true, it means the slot is processed and freed.
+                // The exit signal detection also sets ctx.running to false, if not already.
+                if !ctx.running.load(Ordering::Acquire)
+                    && ctx.free_slots_count.load(Ordering::SeqCst) == ctx.depth
+                {
+                    info!(
+                        "io_poll worker exit gracefully after receiving shutdown signal and completing all IO"
+                    );
+                    break;
+                }
             }
         }
     }
@@ -240,6 +301,7 @@ fn worker_poll<C: IOCallbackCustom>(
 fn verify_result<C: IOCallbackCustom>(
     ctx: &IoSharedContext<C>, context: aio_context_t, slot: &mut AioSlot<C>, info: &io_event,
 ) -> bool {
+    // Original verify_result logic without exit signal detection
     if info.res <= 0 {
         slot.set_error((-info.res) as i32, &ctx.cb_workers);
         return true;
@@ -263,6 +325,22 @@ fn verify_result<C: IOCallbackCustom>(
             return false;
         }
     }
+}
+
+#[inline(always)]
+fn verify_result_for_shutdown<C: IOCallbackCustom>(
+    ctx: Arc<IoSharedContext<C>>, context: aio_context_t, slot: &mut AioSlot<C>, info: &io_event,
+    free_sender: Sender<u16>,
+) -> bool {
+    // Check for the exit signal first
+    if (slot.iocb.aio_flags & IOCB_FLAG_IS_EXIT_SIGNAL) != 0 {
+        info!("Received exit signal from submitter. Initiating poller shutdown.");
+        ctx.running.store(false, Ordering::SeqCst); // Signal to poller to enter draining mode
+        return true; // This slot is handled, can be freed
+    }
+
+    // Fallback to original verify_result logic for non-exit signals
+    verify_result(&ctx, context, slot, info)
 }
 
 // Relevant symbols from the native bindings exposed via aio-bindings

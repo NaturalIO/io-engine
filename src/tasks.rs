@@ -45,6 +45,7 @@ pub struct IOEvent<C: IOCallbackCustom> {
     res: AtomicI32,
     cb: Option<C>,
     sub_tasks: Option<EmbeddedList>,
+    pub(crate) is_exit_signal: bool, // New field to identify exit signal
 }
 
 impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
@@ -76,6 +77,22 @@ impl<C: IOCallbackCustom> IOEvent<C> {
             cb: None,
             sub_tasks: None,
             node: Default::default(),
+            is_exit_signal: false, // Default to false
+        })
+    }
+
+    #[inline]
+    pub fn new_exit_signal(fd: RawFd) -> Box<Self> {
+        Box::new(Self {
+            buf: Some(Buffer::aligned(0).unwrap()), // Zero-length buffer
+            fd,                                     // Use the provided valid FD
+            action: IOAction::Read,                 // Read operation
+            offset: 0,
+            res: AtomicI32::new(0),
+            cb: None,
+            sub_tasks: None,
+            node: Default::default(),
+            is_exit_signal: true, // Mark as exit signal
         })
     }
 
