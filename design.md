@@ -18,21 +18,21 @@
 
 ### 2.1. 目录结构调整
 
-将通用组件移至顶层，`scheduler` 目录专注于调度和后端实现。
+将通用组件移至顶层，`driver` 目录专注于驱动实现。
 
 ```text
 src/
 ├── lib.rs
-├── tasks.rs            # 原 scheduler/tasks.rs (仅保留 IOEvent)
-├── callback_worker.rs  # 原 scheduler/callback_worker.rs
-├── embedded_list.rs    # 原 scheduler/embedded_list.rs
-├── merge.rs            # 原 scheduler/merge.rs
-└── scheduler/
+├── tasks.rs            # 原 driver/tasks.rs (仅保留 IOEvent)
+├── callback_worker.rs  # 原 driver/callback_worker.rs
+├── embedded_list.rs    # 原 driver/embedded_list.rs
+├── merge.rs            # 原 driver/merge.rs
+├── common.rs           # 原 driver/common.rs (提取公共调度逻辑)
+├── context.rs          # 原 driver/context.rs (定义 IOContext (对外) 和 IoSharedContext (共享))
+└── driver/             # 原 scheduler/ 目录，专注于驱动实现
     ├── mod.rs
-    ├── context.rs      # 定义 IOContext (对外) 和 IoSharedContext (共享)
-    ├── common.rs       # 提取公共调度逻辑 (Queue Polling, Budget)
     ├── aio.rs          # AIO Driver & Slot 实现
-    └── uring.rs        # io_uring Driver & Slot 实现
+    └── uring.rs        # io_uring Driver & Slot 实现 (待实现)
 ```
 
 ### 2.2. 共享上下文 (`IoSharedContext`)
@@ -75,13 +75,19 @@ pub struct IOContext<C: IOCallbackCustom> {
 
 Worker 线程的逻辑被封装在各自的 Driver 模块中。每个 Driver 拥有自己的 `start` 方法，启动线程并运行 loop。
 
-#### A. AIO Driver (`src/scheduler/aio.rs`)
+#### A. AIO Driver (`src/driver/aio.rs`)
 
 ```rust
 // AIO 专有的 Slot，包含 iocb
-struct AioSlot<C: IOCallbackCustom> {
+pub struct AioSlot<C: IOCallbackCustom> {
     event: Option<Box<IOEvent<C>>>,
     iocb: iocb, 
+}
+
+// 封装 AIO 上下文和 Slot 数组，供 Worker 线程共享
+struct AioInner<C: IOCallbackCustom> {
+    context: aio_context_t,
+    slots: UnsafeCell<Vec<AioSlot<C>>>,
 }
 
 pub struct AioDriver;
@@ -89,12 +95,84 @@ pub struct AioDriver;
 impl AioDriver {
     // 启动 Submitter 和 Poller 线程
     pub fn start<C>(ctx: Arc<IoSharedContext<C>>) -> io::Result<()> {
-        // 1. 初始化 aio_context
-        // 2. 分配 Vec<AioSlot>
-        // 3. 启动线程，传入 ctx 和 slots
+        // ... (初始化 aio_context, slots, channels) ...
+
+        // 启动 Submitter 线程
+        thread::spawn(move || worker_submit(ctx_submit, inner_submit, r_noti, r_free));
+
+        // 启动 Poller 线程
+        thread::spawn(move || worker_poll(ctx_poll, inner_poll, s_free_poll));
     }
 }
-```
+
+// AIO Worker 线程的优化退出逻辑:
+// 1.  **零长度读作为退出信号**: 当 Submitter 线程需要退出时（例如，所有 IOContext 被 Drop），它会提交一个特殊的 "零长度读" (aio_nbytes = 0) 请求到内核。这个操作不执行实际的 IO，但会生成一个完成事件来唤醒 Poller 线程。
+// 2.  **Poller 阻塞等待**: Poller 线程将 `io_getevents` 的 `timespec` 参数设置为无限阻塞（或一个非常长的超时），避免 CPU 频繁唤醒。
+// 3.  **Poller 识别并优雅退出**: `verify_result` 辅助函数或 `worker_poll` 内部逻辑将识别这个零长度读完成事件。一旦识别到，Poller 线程会进入一个 "排空模式"，继续处理任何剩余的、非零长度的 IO 事件，直到所有 `depth` 的 Slot 都被释放（即 `ctx.free_slots_count == ctx.depth`），确保所有 IO 均已完成。最后，Poller 线程优雅地退出。
+
+// Submitter 线程 (示例片段，具体实现需要分配 slot ID 和构建 event)
+fn worker_submit<C: IOCallbackCustom>(...) {
+    // ...
+    if noti_recv.recv().is_err() {
+        // 构造并提交一个零长度读 Event 作为退出信号。
+        // 需要确保其被识别为退出信号 (例如，使用特定的 fd 或在 IoEvent 中增加一个 flag)。
+        // 零长度读不会实际读取数据，但会生成完成事件。
+        // 例如：使用一个无效的 fd，nbytes=0
+        /*
+        let exit_slot_id = // 从 free_recv 获取一个空闲 slot_id;
+        let mut exit_event = IOEvent::<C>::new(
+            -1, // 约定一个特殊 fd，或使用 IoEvent 的 custom 字段
+            Buffer::aligned(0).unwrap(), // 长度为 0 的 Buffer
+            IOAction::Read,
+            0
+        );
+        // ... 填充 slot_ref[exit_slot_id].iocb，设置 aio_nbytes = 0
+        // io_submit(aio_context, 1, &mut slot_ref[exit_slot_id].iocb as *mut _);
+        */
+        info!("io_submit worker exit due to closing");
+        return;
+    }
+    // ... 正常提交逻辑 ...
+}
+
+// Poller 线程 (示例片段)
+fn worker_poll<C: IOCallbackCustom>(...) {
+    // ...
+    let ts = timespec { tv_sec: -1, tv_nsec: 0 }; // 无限阻塞或非常长的超时
+    loop {
+        // ... io_getevents 阻塞等待事件 ...
+        for ref info in &infos {
+            let slot_id = (*info).data as usize;
+            // 假设 verify_result_and_check_exit_signal 能处理并返回是否是退出信号
+            if verify_result_and_check_exit_signal(&ctx, inner.context, &mut slots_ref[slot_id], info) {
+                // 收到退出信号，并且所有 IO 已完成
+                if ctx.free_slots_count.load(Ordering::SeqCst) == ctx.depth {
+                    info!("io_poll worker exit gracefully after receiving shutdown signal and completing all IO");
+                    let _ = io_destroy(inner.context);
+                    return; // Poller 线程退出
+                }
+            }
+        }
+    }
+}
+
+// 辅助函数 (示例片段)
+#[inline(always)]
+fn verify_result_and_check_exit_signal<C: IOCallbackCustom>(
+    ctx: &IoSharedContext<C>, context: aio_context_t, slot: &mut AioSlot<C>, info: &io_event,
+) -> bool {
+    // 识别零长度读作为退出信号
+    // 例如：如果 slot.iocb.aio_nbytes == 0 且 info.res == 0 (或特定的 fd/tag)
+    if slot.iocb.aio_nbytes == 0 && info.res == 0 /* && slot.event.as_ref().map_or(false, |e| e.is_exit_signal()) */ {
+        // 这是退出信号，不调用回调，直接标记为已处理
+        return true; // 表示此 slot 已处理，可以释放
+    }
+    // ... 正常 verify_result 逻辑 ...
+    // 如果不是退出信号，则执行正常的错误/写入处理，并决定是否重新提交
+    // ...
+    false // 默认情况，不是退出信号
+}
+
 
 #### B. io_uring Driver (`src/scheduler/uring.rs`)
 
