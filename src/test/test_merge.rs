@@ -1,4 +1,7 @@
-use crate::scheduler::*;
+use crate::callback_worker::IOWorkers;
+use crate::context::IOContext;
+use crate::merge::IOMergeSubmitter;
+use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use std::os::fd::RawFd;
 use std::{
     sync::{Arc, Mutex},
@@ -7,6 +10,7 @@ use std::{
 
 use crate::test::*;
 use atomic_waitgroup::WaitGroup;
+use crossfire::BlockingTxTrait;
 use io_buffer::Buffer;
 
 #[test]
@@ -17,30 +21,31 @@ fn test_merged_submit() {
 
     println!("created temp file fd={}", owned_fd.fd);
     let fd = owned_fd.fd;
-    let ctx = IOContext::<ClosureCb>::new(128, &IOWorkers::new(2)).unwrap();
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
+    let _ctx = IOContext::<ClosureCb, _>::new(128, rx, &IOWorkers::new(2)).unwrap();
 
-    _test_merge_submit(fd, ctx.clone(), 1024, 1024, 16 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 512, 16 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 256, 16 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 64, 64 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 64, 32 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 64, 16 * 1024);
-    _test_merge_submit(fd, ctx.clone(), 1024, 64, 1 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 1024, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 512, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 256, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 64 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 32 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 1 * 1024);
 
     std::thread::sleep(Duration::from_secs(1));
 }
 
-fn _test_merge_submit(
-    fd: RawFd, ctx: Arc<IOContext<ClosureCb>>, io_size: usize, batch_num: usize,
-    merge_size_limit: usize,
+fn _test_merge_submit<
+    S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send + Sync + 'static,
+>(
+    fd: RawFd, sender: S, io_size: usize, batch_num: usize, merge_size_limit: usize,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
-    let mut m_write = IOMergeSubmitter::new(
+    let mut m_write = IOMergeSubmitter::<ClosureCb, _>::new(
         fd,
-        ctx.clone(),
+        sender.clone(),
         merge_size_limit,
         IOAction::Write,
-        IOChannelType::Write,
     );
 
     let rt =
@@ -93,12 +98,11 @@ fn _test_merge_submit(
         // TODO assert f.size
 
         let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-        let mut m_read = IOMergeSubmitter::new(
+        let mut m_read = IOMergeSubmitter::<ClosureCb, _>::new(
             fd,
-            ctx.clone(),
+            sender.clone(),
             merge_size_limit,
             IOAction::Read,
-            IOChannelType::Read,
         );
         println!("--- reading");
 
