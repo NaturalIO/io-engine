@@ -117,15 +117,26 @@ impl UringDriver {
 
 ### 2.4. 公共调度逻辑 (`src/scheduler/common.rs`)
 
-将原 `worker_submit` 中复杂的队列遍历和配额计算逻辑提取出来。
+将原 `worker_submit` 中的队列处理逻辑提取出来。为了最大化性能并减少中间内存分配，我们使用泛型闭包来直接消费获取到的事件。
 
 ```rust
-pub fn poll_request_from_queues<C>(
+/// 从多级队列中轮询任务
+/// 
+/// - `ctx`: 共享上下文
+/// - `quota`: 本次允许获取的最大任务数（通常等于当前 Submitter 手中的空闲 Slot 数量）
+/// - `consumer`: 泛型闭包，用于接收并处理 Event。
+///   Submitter 可以在此闭包中直接将 Event 填充到 Slot 中。
+pub fn poll_request_from_queues<C, F>(
     ctx: &IoSharedContext<C>, 
-    events_out: &mut VecDeque<Box<IOEvent<C>>>
-) {
+    quota: usize,
+    mut consumer: F
+) 
+where 
+    C: IOCallbackCustom,
+    F: FnMut(Box<IOEvent<C>>) {
     // 实现原有的 EmbeddedList 遍历、优先级控制、Budget 逻辑
-    // 从 ctx.queues 中取出 event 放入 events_out
+    // 当找到 Event 时，直接调用 consumer(event)
+    // 内部维护配额计数，达到 quota 即停止
 }
 ```
 
