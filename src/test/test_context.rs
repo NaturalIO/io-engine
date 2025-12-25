@@ -1,3 +1,5 @@
+// Copyright (c) 2025 NaturalIO
+
 use crate::callback_worker::IOWorkers;
 use crate::context::{IOChannelType, IOContext};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};

@@ -1,3 +1,5 @@
+// Copyright (c) 2025 NaturalIO
+
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use io_buffer::Buffer;
 use nix::errno::Errno;

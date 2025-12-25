@@ -1,75 +1,18 @@
-// ===============================================================================================
-// Copyright (c) 2018 Hans-Martin Will
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-// ===============================================================================================
-
-// Relevant symbols from the native bindings exposed via aio-bindings
-pub use io_engine_aio_bindings::{
-    __NR_io_destroy, __NR_io_getevents, __NR_io_setup, __NR_io_submit, IOCB_CMD_FDSYNC,
-    IOCB_CMD_FSYNC, IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_FLAG_RESFD, RWF_DSYNC, RWF_SYNC,
-    aio_context_t, io_event, iocb, syscall, timespec,
-};
-pub use libc::c_long;
-
-// -----------------------------------------------------------------------------------------------
-// Inline functions that wrap the kernel calls for the entry points corresponding to Linux
-// AIO functions
-// -----------------------------------------------------------------------------------------------
-
-// Initialize an AIO context for a given submission queue size within the kernel.
-//
-// See [io_setup(7)](http://man7.org/linux/man-pages/man2/io_setup.2.html) for details.
-#[inline(always)]
-pub fn io_setup(nr: c_long, ctxp: *mut aio_context_t) -> c_long {
-    unsafe { syscall(__NR_io_setup as c_long, nr, ctxp) }
-}
-
-// Destroy an AIO context.
-//
-// See [io_destroy(7)](http://man7.org/linux/man-pages/man2/io_destroy.2.html) for details.
-#[inline(always)]
-pub fn io_destroy(ctx: aio_context_t) -> c_long {
-    unsafe { syscall(__NR_io_destroy as c_long, ctx) }
-}
-
-// Submit a batch of IO operations.
-//
-// See [io_sumit(7)](http://man7.org/linux/man-pages/man2/io_submit.2.html) for details.
-#[inline(always)]
-pub fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_long {
-    unsafe { syscall(__NR_io_submit as c_long, ctx, nr, iocbpp) }
-}
-
-// Retrieve completion events for previously submitted IO requests.
-//
-// See [io_getevents(7)](http://man7.org/linux/man-pages/man2/io_getevents.2.html) for details.
-#[inline(always)]
-pub fn io_getevents(
-    ctx: aio_context_t, min_nr: c_long, max_nr: c_long, events: *mut io_event,
-    timeout: *mut timespec,
-) -> c_long {
-    unsafe { syscall(__NR_io_getevents as c_long, ctx, min_nr, max_nr, events, timeout) }
-}
+// Copyright (c) 2025 NaturalIO
 
 use crate::callback_worker::IOWorkers;
+use crate::common::{SlotCollection, poll_request_from_queues};
+use crate::context::IoSharedContext;
 use crate::tasks::{IOAction, IOCallbackCustom, IOEvent};
+use crossbeam::channel::{Receiver, Sender, bounded};
+use nix::errno::Errno;
+use std::{
+    cell::UnsafeCell,
+    io,
+    mem::transmute,
+    sync::{Arc, atomic::Ordering},
+    thread,
+};
 
 pub struct AioSlot<C: IOCallbackCustom> {
     pub(crate) iocb: iocb,
@@ -116,18 +59,6 @@ impl<C: IOCallbackCustom> AioSlot<C> {
         }
     }
 }
-
-use crate::common::{SlotCollection, poll_request_from_queues};
-use crate::context::IoSharedContext;
-use crossbeam::channel::{Receiver, Sender, bounded};
-use nix::errno::Errno;
-use std::{
-    cell::UnsafeCell,
-    io,
-    mem::transmute,
-    sync::{Arc, atomic::Ordering},
-    thread,
-};
 
 struct ThreadSafeSlots<C: IOCallbackCustom>(UnsafeCell<Vec<AioSlot<C>>>);
 
@@ -234,29 +165,6 @@ fn worker_submit<C: IOCallbackCustom>(
                         continue 'submit;
                     }
                     error!("io_submit error: {}", result);
-                    // TODO Error handling, maybe drop slots?
-                    // Currently we just log. The slots remain "busy" forever?
-                    // If we don't submit, we should probably return them to free list or error callback.
-                    // But old code just looped or returned?
-                    // Old code loop on EINTR, else logged error.
-                    // If error, it didn't break 'submit loop?
-                    // "if result < 0 ... error ... } else {"
-                    // If error, it falls through and continues 'submit loop? No, it loops 'submit' only on EINTR.
-                    // If other error, it logs and... exits 'submit' loop? No, it continues 'submit' loop because it didn't break?
-                    // Wait, old code:
-                    /*
-                    if result < 0 {
-                        // ...
-                        if -result == Errno::EINTR ... continue 'submit;
-                        error!("io_submit error: {}", result);
-                        // TODO Error
-                    } else {
-                        // ...
-                    }
-                    */
-                    // It seems it would loop infinitely if result < 0 and not EINTR?
-                    // Or effectively stuck.
-                    // Let's assume it breaks or we should break.
                     break 'submit;
                 } else {
                     if result == left as libc::c_long {
@@ -351,4 +259,52 @@ fn verify_result<C: IOCallbackCustom>(
             return false;
         }
     }
+}
+
+// Relevant symbols from the native bindings exposed via aio-bindings
+pub use io_engine_aio_bindings::{
+    __NR_io_destroy, __NR_io_getevents, __NR_io_setup, __NR_io_submit, IOCB_CMD_FDSYNC,
+    IOCB_CMD_FSYNC, IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_FLAG_RESFD, RWF_DSYNC, RWF_SYNC,
+    aio_context_t, io_event, iocb, syscall, timespec,
+};
+pub use libc::c_long;
+
+// -----------------------------------------------------------------------------------------------
+// Inline functions that wrap the kernel calls for the entry points corresponding to Linux
+// AIO functions
+// -----------------------------------------------------------------------------------------------
+
+// Initialize an AIO context for a given submission queue size within the kernel.
+//
+// See [io_setup(7)](http://man7.org/linux/man-pages/man2/io_setup.2.html) for details.
+#[inline(always)]
+pub fn io_setup(nr: c_long, ctxp: *mut aio_context_t) -> c_long {
+    unsafe { syscall(__NR_io_setup as c_long, nr, ctxp) }
+}
+
+// Destroy an AIO context.
+//
+// See [io_destroy(7)](http://man7.org/linux/man-pages/man2/io_destroy.2.html) for details.
+#[inline(always)]
+pub fn io_destroy(ctx: aio_context_t) -> c_long {
+    unsafe { syscall(__NR_io_destroy as c_long, ctx) }
+}
+
+// Submit a batch of IO operations.
+//
+// See [io_sumit(7)](http://man7.org/linux/man-pages/man2/io_submit.2.html) for details.
+#[inline(always)]
+pub fn io_submit(ctx: aio_context_t, nr: c_long, iocbpp: *mut *mut iocb) -> c_long {
+    unsafe { syscall(__NR_io_submit as c_long, ctx, nr, iocbpp) }
+}
+
+// Retrieve completion events for previously submitted IO requests.
+//
+// See [io_getevents(7)](http://man7.org/linux/man-pages/man2/io_getevents.2.html) for details.
+#[inline(always)]
+pub fn io_getevents(
+    ctx: aio_context_t, min_nr: c_long, max_nr: c_long, events: *mut io_event,
+    timeout: *mut timespec,
+) -> c_long {
+    unsafe { syscall(__NR_io_getevents as c_long, ctx, min_nr, max_nr, events, timeout) }
 }

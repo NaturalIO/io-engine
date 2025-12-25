@@ -1,3 +1,5 @@
+// Copyright (c) 2025 NaturalIO
+
 #[macro_use]
 extern crate log;
 #[macro_use]

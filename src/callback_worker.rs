@@ -1,3 +1,5 @@
+// Copyright (c) 2025 NaturalIO
+
 use crossbeam::channel::{Sender, bounded};
 
 use crate::tasks::{IOCallbackCustom, IOEvent};
