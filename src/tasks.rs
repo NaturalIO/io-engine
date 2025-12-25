@@ -1,25 +1,3 @@
-/*
-Copyright (c) NaturalIO Contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-*/
-
 use std::os::fd::RawFd;
 use std::{
     fmt,
@@ -28,8 +6,7 @@ use std::{
 
 use nix::errno::Errno;
 
-use super::embedded_list::*;
-use super::{aio, callback_worker::*};
+use crate::embedded_list::*;
 use io_buffer::Buffer;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -39,14 +16,14 @@ pub enum IOAction {
 }
 
 /// Define your callback with this trait
-pub trait IOCallbackCustom: Sized + 'static + Send + Unpin {
+pub trait IoCallback: Sized + 'static + Send + Unpin {
     fn call(self, _event: Box<IOEvent<Self>>);
 }
 
 /// Closure callback for IOEvent
 pub struct ClosureCb(pub Box<dyn FnOnce(Box<IOEvent<Self>>) + Send + Sync + 'static>);
 
-impl IOCallbackCustom for ClosureCb {
+impl IoCallback for ClosureCb {
     fn call(self, event: Box<IOEvent<Self>>) {
         (self.0)(event)
     }
@@ -54,7 +31,7 @@ impl IOCallbackCustom for ClosureCb {
 
 // Carries the information of read/write event
 #[repr(C)]
-pub struct IOEvent<C: IOCallbackCustom> {
+pub struct IOEvent<C: IoCallback> {
     /// make sure EmbeddedListNode always in the front.
     /// This is for putting sub_tasks in the link list, without additional allocation.
     pub(crate) node: EmbeddedListNode,
@@ -67,7 +44,7 @@ pub struct IOEvent<C: IOCallbackCustom> {
     sub_tasks: Option<EmbeddedList>,
 }
 
-impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
+impl<C: IoCallback> fmt::Debug for IOEvent<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(sub_tasks) = self.sub_tasks.as_ref() {
             write!(
@@ -83,7 +60,7 @@ impl<C: IOCallbackCustom> fmt::Debug for IOEvent<C> {
     }
 }
 
-impl<C: IOCallbackCustom> IOEvent<C> {
+impl<C: IoCallback> IOEvent<C> {
     #[inline]
     pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
         log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);
@@ -126,7 +103,7 @@ impl<C: IOCallbackCustom> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub(crate) fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
+    pub fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
         self.sub_tasks = Some(sub_tasks)
     }
 
@@ -226,53 +203,18 @@ impl<C: IOCallbackCustom> IOEvent<C> {
             self.callback();
         }
     }
-}
 
-pub(crate) struct IOEventTaskSlot<C: IOCallbackCustom> {
-    pub(crate) iocb: aio::iocb,
-    pub(crate) event: Option<Box<IOEvent<C>>>,
-}
-
-impl<C: IOCallbackCustom> IOEventTaskSlot<C> {
-    pub(crate) fn new(slot_id: u64) -> Self {
-        Self {
-            iocb: aio::iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() },
-            event: None,
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn fill_slot(&mut self, event: Box<IOEvent<C>>, slot_id: u16) {
-        let iocb = &mut self.iocb;
-        iocb.aio_data = slot_id as libc::__u64;
-        iocb.aio_fildes = event.fd as libc::__u32;
-        let buf = event.buf.as_ref().unwrap();
-        iocb.aio_lio_opcode = event.action as u16;
-        iocb.aio_buf = buf.get_raw() as u64;
-        iocb.aio_nbytes = buf.len() as u64;
-        iocb.aio_offset = event.offset;
-        self.event.replace(event);
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_written(&mut self, written: usize, cb: &IOWorkers<C>) -> bool {
-        if self.iocb.aio_nbytes <= written as u64 {
-            if let Some(event) = self.event.take() {
-                event.set_ok();
-                cb.send(event);
-            }
-            return true;
-        }
-        self.iocb.aio_nbytes -= written as u64;
-        self.iocb.aio_buf += written as u64;
-        return false;
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_error(&mut self, errno: i32, cb: &IOWorkers<C>) {
-        if let Some(event) = self.event.take() {
-            event.set_error(errno);
-            cb.send(event);
-        }
+    // New constructor for exit signal events
+    pub(crate) fn new_exit_signal(fd: RawFd) -> Box<Self> {
+        Box::new(Self {
+            node: Default::default(),
+            buf: None,
+            offset: 0,
+            action: IOAction::Read, // Exit signal is a read
+            fd,
+            res: AtomicI32::new(0),
+            cb: None, // No callback for exit signal
+            sub_tasks: None,
+        })
     }
 }

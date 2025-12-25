@@ -1,3 +1,5 @@
+// Copyright (c) 2025 NaturalIO
+
 use std::{fmt, mem::transmute, ptr::null_mut};
 
 pub struct EmbeddedListNode {
