@@ -1,5 +1,5 @@
 use crate::callback_worker::IOWorkers;
-use crate::context::IOContext;
+use crate::context::{IOContext, IoEngineType};
 use crate::merge::IOMergeSubmitter;
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use std::os::fd::RawFd;
@@ -14,7 +14,7 @@ use crossfire::BlockingTxTrait;
 use io_buffer::Buffer;
 
 #[test]
-fn test_merged_submit() {
+fn test_merged_submit_aio() {
     setup_log();
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
@@ -22,7 +22,31 @@ fn test_merged_submit() {
     println!("created temp file fd={}", owned_fd.fd);
     let fd = owned_fd.fd;
     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
-    let _ctx = IOContext::<ClosureCb, _>::new(128, rx, &IOWorkers::new(2)).unwrap();
+    let _ctx =
+        IOContext::<ClosureCb, _>::new(128, rx, &IOWorkers::new(2), IoEngineType::Aio).unwrap();
+
+    _test_merge_submit(fd, tx.clone(), 1024, 1024, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 512, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 256, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 64 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 32 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 16 * 1024);
+    _test_merge_submit(fd, tx.clone(), 1024, 64, 1 * 1024);
+
+    std::thread::sleep(Duration::from_secs(1));
+}
+
+#[test]
+fn test_merged_submit_uring() {
+    setup_log();
+    let temp_file = make_temp_file();
+    let owned_fd = create_temp_file(temp_file.as_ref());
+
+    println!("created temp file fd={}", owned_fd.fd);
+    let fd = owned_fd.fd;
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
+    let _ctx =
+        IOContext::<ClosureCb, _>::new(128, rx, &IOWorkers::new(2), IoEngineType::Uring).unwrap();
 
     _test_merge_submit(fd, tx.clone(), 1024, 1024, 16 * 1024);
     _test_merge_submit(fd, tx.clone(), 1024, 512, 16 * 1024);
@@ -114,7 +138,7 @@ fn _test_merge_submit<
             let _wg = wg.clone();
             event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_result() {
+                match _event.get_read_result() {
                     Ok(buffer) => {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }
@@ -138,7 +162,7 @@ fn _test_merge_submit<
             let _wg = wg.clone();
             event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_result() {
+                match _event.get_read_result() {
                     Ok(buffer) => {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }
@@ -161,7 +185,7 @@ fn _test_merge_submit<
             let _wg = wg.clone();
             event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_result() {
+                match _event.get_read_result() {
                     Ok(buffer) => {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }

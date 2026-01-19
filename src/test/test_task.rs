@@ -28,11 +28,18 @@ fn test_ioevent() {
     let buffer = Buffer::aligned(4096).unwrap();
     let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
     assert!(!event.is_done());
-    event.set_ok();
+    event.set_copied(4096);
     assert!(event.is_done());
-    assert!(event.get_result().is_ok());
+    assert!(event.get_write_result().is_ok());
+
+    let buffer = Buffer::aligned(4096).unwrap();
+    let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
     event.set_error(Errno::EINTR as i32);
-    assert!(event.get_result().is_err());
-    let err = event.get_result().err().unwrap();
+    assert!(event.get_write_result().is_err());
+
+    let buffer = Buffer::aligned(4096).unwrap();
+    let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
+    event.set_error(Errno::EINTR as i32);
+    let err = event.get_write_result().err().unwrap();
     assert_eq!(err, Errno::EINTR);
 }

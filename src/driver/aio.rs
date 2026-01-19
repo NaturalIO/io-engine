@@ -48,9 +48,9 @@ impl<C: IoCallback> AioSlot<C> {
     #[inline(always)]
     pub fn set_written(&mut self, written: usize, cb: &IOWorkers<C>) -> bool {
         if self.iocb.aio_nbytes <= written as u64 {
-            if let Some(event) = self.event.take() {
+            if let Some(mut event) = self.event.take() {
                 // If it was a zero-length read (exit signal), callback is usually None, so this is safe.
-                event.set_ok();
+                event.set_copied(written);
                 cb.send(event);
             }
             return true;
@@ -62,7 +62,7 @@ impl<C: IoCallback> AioSlot<C> {
 
     #[inline(always)]
     pub fn set_error(&mut self, errno: i32, cb: &IOWorkers<C>) {
-        if let Some(event) = self.event.take() {
+        if let Some(mut event) = self.event.take() {
             event.set_error(errno);
             cb.send(event);
         }
