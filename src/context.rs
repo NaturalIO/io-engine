@@ -2,6 +2,7 @@
 
 use crate::callback_worker::IOWorkers;
 use crate::driver::aio::AioDriver;
+use crate::driver::uring::UringDriver; // Import UringDriver
 use crate::tasks::{IOEvent, IoCallback};
 use crossfire::BlockingRxTrait;
 use std::{
@@ -12,10 +13,14 @@ use std::{
     },
 };
 
+pub enum IoEngineType {
+    Aio,
+    Uring,
+}
+
 pub struct IoCtxShared<C: IoCallback, Q> {
     pub depth: usize,
     pub queue: Q,
-
     pub cb_workers: IOWorkers<C>,
     pub free_slots_count: AtomicUsize,
 }
@@ -31,16 +36,23 @@ impl<C: IoCallback, Q> IOContext<C, Q>
 where
     Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
 {
-    pub fn new(depth: usize, queue: Q, cbs: &IOWorkers<C>) -> Result<Arc<Self>, io::Error> {
+    pub fn new(
+        depth: usize,
+        queue: Q,
+        cbs: &IOWorkers<C>,
+        driver_type: IoEngineType, // New parameter
+    ) -> Result<Arc<Self>, io::Error> {
         let inner = Arc::new(IoCtxShared {
             depth,
-
             queue,
             cb_workers: cbs.clone(),
             free_slots_count: AtomicUsize::new(depth),
         });
 
-        AioDriver::start(inner.clone())?;
+        match driver_type {
+            IoEngineType::Aio => AioDriver::start(inner.clone())?,
+            IoEngineType::Uring => UringDriver::start(inner.clone())?,
+        }
 
         Ok(Arc::new(Self { inner }))
     }

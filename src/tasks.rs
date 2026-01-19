@@ -1,13 +1,10 @@
+use std::fmt;
 use std::os::fd::RawFd;
-use std::{
-    fmt,
-    sync::atomic::{AtomicI32, Ordering},
-};
 
 use nix::errno::Errno;
 
 use crate::embedded_list::*;
-use io_buffer::Buffer;
+use io_buffer::{Buffer, safe_copy};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum IOAction {
@@ -39,7 +36,7 @@ pub struct IOEvent<C: IoCallback> {
     pub offset: i64,
     pub action: IOAction,
     pub fd: RawFd,
-    res: AtomicI32,
+    res: i32,
     cb: Option<C>,
     sub_tasks: Option<EmbeddedList>,
 }
@@ -69,7 +66,7 @@ impl<C: IoCallback> IOEvent<C> {
             fd,
             action,
             offset,
-            res: AtomicI32::new(0),
+            res: i32::MIN,
             cb: None,
             sub_tasks: None,
             node: Default::default(),
@@ -114,15 +111,15 @@ impl<C: IoCallback> IOEvent<C> {
 
     #[inline(always)]
     pub fn is_done(&self) -> bool {
-        self.res.load(Ordering::Acquire) != 0
+        self.res != i32::MIN
     }
 
-    #[inline]
-    pub fn get_result(&mut self) -> Result<Buffer, Errno> {
-        let res = self.res.load(Ordering::Acquire);
-        if res > 0 {
-            return Ok(self.buf.take().unwrap());
-        } else if res == 0 {
+    #[inline(always)]
+    pub fn get_write_result(self) -> Result<(), Errno> {
+        let res = self.res;
+        if res >= 0 {
+            return Ok(());
+        } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
             return Err(Errno::from_raw(-res));
@@ -130,19 +127,21 @@ impl<C: IoCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn _get_result(&mut self) -> Result<Buffer, i32> {
-        let res = self.res.load(Ordering::Acquire);
-        if res > 0 {
-            return Ok(self.buf.take().unwrap());
-        } else if res == 0 {
+    pub fn get_read_result(mut self) -> Result<Buffer, Errno> {
+        let res = self.res;
+        if res >= 0 {
+            let mut buf = self.buf.take().unwrap();
+            buf.set_len(res as usize);
+            return Ok(buf);
+        } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
-            return Err(res);
+            return Err(Errno::from_raw(-res));
         }
     }
 
     #[inline(always)]
-    pub(crate) fn set_error(&self, mut errno: i32) {
+    pub(crate) fn set_error(&mut self, mut errno: i32) {
         if errno == 0 {
             // XXX: EOF does not have code to represent,
             // also when offset is not align to 4096, may return result 0,
@@ -151,12 +150,16 @@ impl<C: IoCallback> IOEvent<C> {
         if errno > 0 {
             errno = -errno;
         }
-        self.res.store(errno, Ordering::Release);
+        self.res = errno;
     }
 
     #[inline(always)]
-    pub(crate) fn set_ok(&self) {
-        self.res.store(1, Ordering::Release);
+    pub(crate) fn set_copied(&mut self, len: usize) {
+        if self.res == i32::MIN {
+            self.res = len as i32;
+        } else {
+            self.res += len as i32;
+        }
     }
 
     #[inline(always)]
@@ -172,31 +175,40 @@ impl<C: IoCallback> IOEvent<C> {
     #[inline(always)]
     pub(crate) fn callback_merged(mut self: Box<Self>) {
         if let Some(mut tasks) = self.sub_tasks.take() {
-            match self._get_result() {
-                Ok(buffer) => {
-                    if self.action == IOAction::Read {
-                        let mut offset: usize = 0;
-                        let b = buffer.as_ref();
-                        while let Some(mut event) = Self::pop_from_list(&mut tasks) {
-                            let sub_buf = event.buf.as_mut().unwrap();
-                            let sub_size = sub_buf.len();
-                            sub_buf.copy_from(0, &b[offset..offset + sub_size]);
-                            offset += sub_size;
-                            event.set_ok();
-                            event.callback();
+            let res = self.res;
+            if res >= 0 {
+                if self.action == IOAction::Read {
+                    let buffer = self.buf.take().unwrap();
+                    let mut b = buffer.as_ref();
+                    while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                        let sub_buf = event.buf.as_mut().unwrap();
+                        if b.len() == 0 {
+                            // short read
+                            event.set_copied(0);
+                        } else {
+                            let copied = safe_copy(sub_buf, b);
+                            event.set_copied(copied);
+                            b = &b[copied..];
                         }
-                    } else {
-                        while let Some(event) = Self::pop_from_list(&mut tasks) {
-                            event.set_ok();
-                            event.callback();
-                        }
-                    }
-                }
-                Err(errno) => {
-                    while let Some(event) = Self::pop_from_list(&mut tasks) {
-                        event.set_error(errno);
                         event.callback();
                     }
+                } else {
+                    let l = self.buf.as_ref().unwrap().len();
+                    while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                        let mut sub_len = event.get_size();
+                        if sub_len > l {
+                            // short write
+                            sub_len = l;
+                        }
+                        event.set_copied(sub_len);
+                        event.callback();
+                    }
+                }
+            } else {
+                let errno = -res;
+                while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                    event.set_error(errno);
+                    event.callback();
                 }
             }
         } else {
@@ -212,7 +224,7 @@ impl<C: IoCallback> IOEvent<C> {
             offset: 0,
             action: IOAction::Read, // Exit signal is a read
             fd,
-            res: AtomicI32::new(0),
+            res: i32::MIN,
             cb: None, // No callback for exit signal
             sub_tasks: None,
         })
