@@ -9,29 +9,16 @@ To build `io-engine`, you will need:
 -   Rust (stable channel recommended)
 -   `clang` and `libclang-dev` (or equivalent development headers for Clang) for `bindgen` to generate FFI bindings for Linux AIO.
 
-### Linux (Debian/Ubuntu)
+### Only supports Linux (Debian/Ubuntu)
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y clang libclang-dev
-```
 
-### Other Systems
+### Behavior of Short IO
 
-Please refer to your system's package manager documentation for installing `clang` and `libclang-dev`.
+For read, when reaching the file end, might return 0, or short read. It's the upper level user's
+job to check the result and retry.
 
-## Building the Project
-
-To build the project:
-
-```bash
-cargo build
-```
-
-## Running Tests
-
-To run the tests:
-
-```bash
-cargo test
-```
+For write, it's unusual the short write happens to filesystem, it's not efficient to retry as io-uring,
+user should retry the IO
