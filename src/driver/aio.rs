@@ -46,18 +46,12 @@ impl<C: IoCallback> AioSlot<C> {
     }
 
     #[inline(always)]
-    pub fn set_written(&mut self, written: usize, cb: &IOWorkers<C>) -> bool {
-        if self.iocb.aio_nbytes <= written as u64 {
-            if let Some(mut event) = self.event.take() {
-                // If it was a zero-length read (exit signal), callback is usually None, so this is safe.
-                event.set_copied(written);
-                cb.send(event);
-            }
-            return true;
+    pub fn set_result(&mut self, written: usize, cb: &IOWorkers<C>) {
+        if let Some(mut event) = self.event.take() {
+            // If it was a zero-length read (exit signal), callback is usually None, so this is safe.
+            event.set_copied(written);
+            cb.send(event);
         }
-        self.iocb.aio_nbytes -= written as u64;
-        self.iocb.aio_buf += written as u64;
-        return false;
     }
 
     #[inline(always)]
@@ -268,9 +262,8 @@ impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> AioDri
                     continue;
                 }
 
-                if Self::verify_result(&ctx, aio_context, slot, info) {
-                    let _ = free_sender.send(slot_id as u16);
-                }
+                Self::verify_result(&ctx, slot, info);
+                let _ = free_sender.send(slot_id as u16);
             }
 
             if exit_received && ctx.free_slots_count.load(Ordering::SeqCst) == ctx.depth {
@@ -283,32 +276,13 @@ impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> AioDri
     }
 
     #[inline(always)]
-    fn verify_result(
-        ctx: &IoCtxShared<C, Q>, context: aio_context_t, slot: &mut AioSlot<C>, info: &io_event,
-    ) -> bool {
-        if info.res <= 0 {
+    fn verify_result(ctx: &IoCtxShared<C, Q>, slot: &mut AioSlot<C>, info: &io_event) {
+        if info.res < 0 {
+            println!("set error {:?}", info.res);
             slot.set_error((-info.res) as i32, &ctx.cb_workers);
-            return true;
+            return;
         }
-        if slot.set_written(info.res as usize, &ctx.cb_workers) {
-            return true;
-        }
-        trace!("io not enough, resubmit");
-        // Write data not enough, resubmit.
-        let mut arr: [*mut iocb; 1] = [&mut slot.iocb as *mut iocb];
-        'submit: loop {
-            let result = io_submit(context, 1, arr.as_mut_ptr() as *mut *mut iocb);
-            if result < 0 {
-                if -result == Errno::EINTR as i64 {
-                    continue 'submit;
-                }
-                error!("io_re_submit error: {}", result);
-                slot.set_error(-result as i32, &ctx.cb_workers);
-                return true;
-            } else if result > 0 {
-                return false;
-            }
-        }
+        slot.set_result(info.res as usize, &ctx.cb_workers);
     }
 }
 

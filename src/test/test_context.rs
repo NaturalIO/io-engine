@@ -4,7 +4,6 @@ use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossfire::BlockingTxTrait;
 use io_buffer::{Buffer, rand_buffer};
-use nix::errno::Errno;
 use std::sync::mpsc::channel as unbounded;
 extern crate md5;
 
@@ -31,27 +30,14 @@ fn test_read_write_aio() {
     assert!(event.is_done());
     match event.get_read_result() {
         Ok(_buffer2) => {
-            panic!("expect error, but return ok");
+            // NOTE: although the offset is not aligned,
+            // Read the file out of boundary gets res=0
+            assert_eq!(_buffer2.len(), 0);
         }
         Err(e) => {
-            // Read the file out of boundary gets EINVAL
-            assert_eq!(e, Errno::EINVAL);
-            println!("expected error {}", e);
+            panic!("unexpected error {}", e);
         }
     }
-    //    let mut event = IOEvent::new(fd, buffer3, IOAction::Read, 4096);
-    //    event.set_callback(ClosureCb(callback.clone()));
-    //    tx.send(event).expect("submit");
-    //    let event = done_rx.recv().unwrap();
-    //    assert!(event.is_done());
-    //    match event.get_read_result() {
-    //        Ok(buffer2) => {
-    //            assert_eq!(buffer2.len(), 0);
-    //        }
-    //        Err(e) => {
-    //            panic!("unexpected error: {}", e);
-    //        }
-    //    }
     for _j in 0..100 {
         for i in 0..10 {
             // write
