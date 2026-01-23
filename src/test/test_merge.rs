@@ -59,9 +59,7 @@ fn test_merged_submit_uring() {
     std::thread::sleep(Duration::from_secs(1));
 }
 
-fn _test_merge_submit<
-    S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send + Sync + 'static,
->(
+fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + Sync + 'static>(
     fd: RawFd, sender: S, io_size: usize, batch_num: usize, merge_size_limit: usize,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
@@ -84,7 +82,7 @@ fn _test_merge_submit<
         let wg = WaitGroup::new();
 
         let _wg = wg.clone();
-        let write_cb = Box::new(move |_event: Box<IOEvent<ClosureCb>>| {
+        let write_cb = Box::new(move |_event: IOEvent<ClosureCb>| {
             _wg.done();
         });
 
@@ -136,7 +134,7 @@ fn _test_merge_submit<
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
                 match _event.get_read_result() {
                     Ok(buffer) => {
@@ -160,7 +158,7 @@ fn _test_merge_submit<
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
                 match _event.get_read_result() {
                     Ok(buffer) => {
@@ -183,7 +181,7 @@ fn _test_merge_submit<
             let _read_buf = read_buf.clone();
             let offset = i * io_size;
             let _wg = wg.clone();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: Box<IOEvent<ClosureCb>>| {
+            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
                 let mut _buf_all = _read_buf.lock().unwrap();
                 match _event.get_read_result() {
                     Ok(buffer) => {

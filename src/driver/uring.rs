@@ -1,5 +1,5 @@
 use crate::context::IoCtxShared;
-use crate::tasks::{IOAction, IOEvent, IoCallback};
+use crate::tasks::{IOAction, IOEvent, IOEvent_, IoCallback};
 use crossfire::BlockingRxTrait;
 use io_uring::{IoUring, opcode, types};
 use log::{error, info};
@@ -7,7 +7,7 @@ use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Du
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
-pub struct UringDriver<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>> {
+pub struct UringDriver<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>>> {
     _marker: PhantomData<(C, Q)>,
 }
 
@@ -16,7 +16,7 @@ struct UringInner(UnsafeCell<IoUring>);
 unsafe impl Send for UringInner {}
 unsafe impl Sync for UringInner {}
 
-impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> UringDriver<C, Q> {
+impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver<C, Q> {
     pub fn start(ctx: Arc<IoCtxShared<C, Q>>) -> io::Result<()> {
         let depth = ctx.depth as u32;
         let ring = IoUring::new(depth.max(2))?;
@@ -117,12 +117,12 @@ impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> UringD
                                 .offset(offset)
                                 .build(),
                         };
-                        let user_data = Box::into_raw(event) as u64;
+                        let user_data = Box::into_raw(event.0) as u64;
                         let sqe = sqe.user_data(user_data);
                         unsafe {
                             if let Err(_) = sq.push(&sqe) {
                                 error!("SQ full (should not happen)");
-                                let _ = Box::from_raw(user_data as *mut IOEvent<C>);
+                                let _ = Box::from_raw(user_data as *mut IOEvent_<C>);
                             }
                         }
                     }
@@ -157,8 +157,8 @@ impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> UringD
                                 continue;
                             }
 
-                            let event_ptr = user_data as *mut IOEvent<C>;
-                            let mut event = unsafe { Box::from_raw(event_ptr) };
+                            let event_ptr = user_data as *mut IOEvent_<C>;
+                            let mut event = IOEvent(unsafe { Box::from_raw(event_ptr) });
                             let res = cqe.result();
                             if res >= 0 {
                                 event.set_copied(res as usize);

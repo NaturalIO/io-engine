@@ -17,8 +17,8 @@ fn test_read_write_aio() {
     let _ctx =
         IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), IoEngineType::Aio).unwrap();
 
-    let (done_tx, done_rx) = unbounded::<Box<IOEvent<ClosureCb>>>();
-    let callback = Box::new(move |event: Box<IOEvent<ClosureCb>>| {
+    let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
+    let callback = Box::new(move |event: IOEvent<ClosureCb>| {
         let _ = done_tx.send(event);
     });
     let buffer3 = Buffer::aligned(4096).unwrap();
@@ -80,8 +80,8 @@ fn test_read_write_uring() {
     let _ctx =
         IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), IoEngineType::Uring).unwrap();
 
-    let (done_tx, done_rx) = unbounded::<Box<IOEvent<ClosureCb>>>();
-    let callback = Box::new(move |event: Box<IOEvent<ClosureCb>>| {
+    let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
+    let callback = Box::new(move |event: IOEvent<ClosureCb>| {
         let _ = done_tx.send(event);
     });
     let buffer3 = Buffer::aligned(4096).unwrap();

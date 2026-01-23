@@ -11,14 +11,14 @@ impl A {
         let buffer = Buffer::aligned(4096).unwrap();
         let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
         let self1 = self.clone();
-        let cb = move |mut _event: Box<IOEvent<ClosureCb>>| {
+        let cb = move |mut _event: IOEvent<ClosureCb>| {
             Self::done_event(self1, _event);
         };
         event.set_callback(ClosureCb(Box::new(cb)));
         event.callback();
     }
 
-    fn done_event(_self: Arc<Self>, mut _event: Box<IOEvent<ClosureCb>>) {
+    fn done_event(_self: Arc<Self>, mut _event: IOEvent<ClosureCb>) {
         println!("done event");
     }
 }

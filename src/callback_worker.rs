@@ -1,11 +1,11 @@
 use crate::tasks::{IOEvent, IoCallback};
 use crossfire::{MTx, mpmc};
 
-pub struct IOWorkers<C: IoCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
+pub struct IOWorkers<C: IoCallback>(pub(crate) MTx<mpmc::Array<IOEvent<C>>>);
 
 impl<C: IoCallback> IOWorkers<C> {
     pub fn new(workers: usize) -> Self {
-        let (tx, rx) = mpmc::bounded_blocking::<Box<IOEvent<C>>>(100000);
+        let (tx, rx) = mpmc::bounded_blocking::<IOEvent<C>>(100000);
         for _i in 0..workers {
             let _rx = rx.clone();
             std::thread::spawn(move || {
@@ -24,7 +24,7 @@ impl<C: IoCallback> IOWorkers<C> {
     }
 
     #[inline(always)]
-    pub fn send(&self, event: Box<IOEvent<C>>) {
+    pub fn send(&self, event: IOEvent<C>) {
         let _ = self.0.send(event);
     }
 }

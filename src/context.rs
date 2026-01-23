@@ -34,7 +34,7 @@ pub struct IOContext<C: IoCallback, Q> {
 
 impl<C: IoCallback, Q> IOContext<C, Q>
 where
-    Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
+    Q: BlockingRxTrait<IOEvent<C>> + Send + 'static,
 {
     pub fn new(
         depth: usize,

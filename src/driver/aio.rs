@@ -18,7 +18,7 @@ use std::{
 
 pub struct AioSlot<C: IoCallback> {
     pub(crate) iocb: iocb,
-    pub(crate) event: Option<Box<IOEvent<C>>>,
+    pub(crate) event: Option<IOEvent<C>>,
 }
 
 impl<C: IoCallback> AioSlot<C> {
@@ -27,7 +27,7 @@ impl<C: IoCallback> AioSlot<C> {
     }
 
     #[inline(always)]
-    pub fn fill_slot(&mut self, event: Box<IOEvent<C>>, slot_id: u16) {
+    pub fn fill_slot(&mut self, event: IOEvent<C>, slot_id: u16) {
         let iocb = &mut self.iocb;
         iocb.aio_data = slot_id as libc::__u64;
         iocb.aio_fildes = event.fd as libc::__u32;
@@ -82,11 +82,11 @@ struct AioInner<C: IoCallback> {
 unsafe impl<C: IoCallback> Send for AioInner<C> {}
 unsafe impl<C: IoCallback> Sync for AioInner<C> {}
 
-pub struct AioDriver<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>> {
+pub struct AioDriver<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>>> {
     _marker: std::marker::PhantomData<(C, Q)>,
 }
 
-impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> AioDriver<C, Q> {
+impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C, Q> {
     pub fn start(ctx: Arc<IoCtxShared<C, Q>>) -> io::Result<()> {
         let depth = ctx.depth;
         let mut aio_context: aio_context_t = 0;

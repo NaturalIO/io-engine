@@ -1,9 +1,11 @@
+use std::cell::UnsafeCell;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::RawFd;
 
 use nix::errno::Errno;
 
-use crate::embedded_list::*;
+use embed_collections::dlist::{DLinkedList, DListItem, DListNode};
 use io_buffer::{Buffer, safe_copy};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -14,63 +16,85 @@ pub enum IOAction {
 
 /// Define your callback with this trait
 pub trait IoCallback: Sized + 'static + Send + Unpin {
-    fn call(self, _event: Box<IOEvent<Self>>);
+    fn call(self, _event: IOEvent<Self>);
 }
 
 /// Closure callback for IOEvent
-pub struct ClosureCb(pub Box<dyn FnOnce(Box<IOEvent<Self>>) + Send + Sync + 'static>);
+pub struct ClosureCb(pub Box<dyn FnOnce(IOEvent<Self>) + Send + Sync + 'static>);
 
 impl IoCallback for ClosureCb {
-    fn call(self, event: Box<IOEvent<Self>>) {
+    fn call(self, event: IOEvent<Self>) {
         (self.0)(event)
+    }
+}
+
+pub struct IOEvent<C: IoCallback>(pub Box<IOEvent_<C>>);
+
+impl<C: IoCallback> Deref for IOEvent<C> {
+    type Target = IOEvent_<C>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<C: IoCallback> DerefMut for IOEvent<C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<C: IoCallback> fmt::Debug for IOEvent<C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
 // Carries the information of read/write event
 #[repr(C)]
-pub struct IOEvent<C: IoCallback> {
-    /// make sure EmbeddedListNode always in the front.
+pub struct IOEvent_<C: IoCallback> {
+    /// make sure DListNode always in the front.
     /// This is for putting sub_tasks in the link list, without additional allocation.
-    pub(crate) node: EmbeddedListNode,
+    pub(crate) node: UnsafeCell<DListNode<Self, ()>>,
     pub buf: Option<Buffer>,
     pub offset: i64,
     pub action: IOAction,
     pub fd: RawFd,
-    res: i32,
+    /// Result of the IO operation.
+    /// Initialized to i32::MIN.
+    /// >= 0: Accumulated bytes transferred (used for partial IO retries).
+    /// < 0: Error code (negative errno).
+    pub(crate) res: i32,
     cb: Option<C>,
-    sub_tasks: Option<EmbeddedList>,
+    sub_tasks: DLinkedList<Box<Self>, ()>,
 }
 
-impl<C: IoCallback> fmt::Debug for IOEvent<C> {
+// Implement DListItem for IOEvent_ to allow it to be linked
+unsafe impl<C: IoCallback> DListItem<()> for IOEvent_<C> {
+    fn get_node(&self) -> &mut DListNode<Self, ()> {
+        unsafe { &mut *self.node.get() }
+    }
+}
+
+impl<C: IoCallback> fmt::Debug for IOEvent_<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if let Some(sub_tasks) = self.sub_tasks.as_ref() {
-            write!(
-                f,
-                "offset={} {:?} sub_tasks {} ",
-                self.offset,
-                self.action,
-                sub_tasks.get_length()
-            )
-        } else {
-            write!(f, "offset={} {:?}", self.offset, self.action)
-        }
+        write!(f, "offset={} {:?} sub_tasks {} ", self.offset, self.action, self.sub_tasks.len())
     }
 }
 
 impl<C: IoCallback> IOEvent<C> {
     #[inline]
-    pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Box<Self> {
+    pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> IOEvent<C> {
         log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);
-        Box::new(Self {
+        IOEvent(Box::new(IOEvent_ {
             buf: Some(buf),
             fd,
             action,
             offset,
             res: i32::MIN,
             cb: None,
-            sub_tasks: None,
-            node: Default::default(),
-        })
+            sub_tasks: DLinkedList::new(),
+            node: UnsafeCell::new(DListNode::default()),
+        }))
     }
 
     /// Set callback for IOEvent, might be closure or a custom struct
@@ -85,23 +109,18 @@ impl<C: IoCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn push_to_list(mut self: Box<Self>, events: &mut EmbeddedList) {
-        events.push_back(&mut self.node);
-        let _ = Box::leak(self);
+    pub fn push_to_list(self, events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) {
+        events.push_back(self.0);
     }
 
     #[inline(always)]
-    pub fn pop_from_list(events: &mut EmbeddedList) -> Option<Box<Self>> {
-        if let Some(event) = events.pop_front::<Self>() {
-            Some(unsafe { Box::from_raw(event) })
-        } else {
-            None
-        }
+    pub fn pop_from_list(events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
+        events.pop_front().map(IOEvent)
     }
 
     #[inline(always)]
-    pub fn set_subtasks(&mut self, sub_tasks: EmbeddedList) {
-        self.sub_tasks = Some(sub_tasks)
+    pub fn set_subtasks(&mut self, sub_tasks: DLinkedList<Box<IOEvent_<C>>, ()>) {
+        self.sub_tasks = sub_tasks;
     }
 
     #[inline(always)]
@@ -163,7 +182,7 @@ impl<C: IoCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub(crate) fn callback(mut self: Box<Self>) {
+    pub(crate) fn callback(mut self) {
         match self.cb.take() {
             Some(cb) => {
                 cb.call(self);
@@ -173,8 +192,14 @@ impl<C: IoCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub(crate) fn callback_merged(mut self: Box<Self>) {
-        if let Some(mut tasks) = self.sub_tasks.take() {
+    pub(crate) fn callback_merged(mut self) {
+        // sub_tasks is not Option anymore, but DLinkedList.
+        // We can check if it's empty.
+        // Use std::mem::take if DLinkedList implements Default (it usually refers to new which is empty).
+        // Or check if it is empty. DLinkedList::new() creates empty list.
+        let mut tasks = std::mem::replace(&mut self.sub_tasks, DLinkedList::new());
+
+        if !tasks.is_empty() {
             let res = self.res;
             if res >= 0 {
                 if self.action == IOAction::Read {
@@ -217,16 +242,17 @@ impl<C: IoCallback> IOEvent<C> {
     }
 
     // New constructor for exit signal events
-    pub(crate) fn new_exit_signal(fd: RawFd) -> Box<Self> {
-        Box::new(Self {
-            node: Default::default(),
+    pub(crate) fn new_exit_signal(fd: RawFd) -> Self {
+        // Exit signal wraps a IOEvent
+        Self(Box::new(IOEvent_ {
+            node: UnsafeCell::new(DListNode::default()),
             buf: None,
             offset: 0,
             action: IOAction::Read, // Exit signal is a read
             fd,
             res: i32::MIN,
             cb: None, // No callback for exit signal
-            sub_tasks: None,
-        })
+            sub_tasks: DLinkedList::new(),
+        }))
     }
 }
