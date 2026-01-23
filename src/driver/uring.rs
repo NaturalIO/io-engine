@@ -1,3 +1,4 @@
+use crate::callback_worker::Worker;
 use crate::context::CtxShared;
 use crate::tasks::{IOAction, IOCallback, IOEvent, IOEvent_};
 use crossfire::BlockingRxTrait;
@@ -7,8 +8,8 @@ use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Du
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
-pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>> {
-    _marker: PhantomData<(C, Q)>,
+pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>, W: Worker<C>> {
+    _marker: PhantomData<(C, Q, W)>,
 }
 
 struct UringInner(UnsafeCell<IoUring>);
@@ -16,8 +17,10 @@ struct UringInner(UnsafeCell<IoUring>);
 unsafe impl Send for UringInner {}
 unsafe impl Sync for UringInner {}
 
-impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver<C, Q> {
-    pub fn start(ctx: Arc<CtxShared<C, Q>>) -> io::Result<()> {
+impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C> + Send + 'static>
+    UringDriver<C, Q, W>
+{
+    pub fn start(ctx: Arc<CtxShared<C, Q, W>>) -> io::Result<()> {
         let depth = ctx.depth as u32;
         let ring = IoUring::new(depth.max(2))?;
         let ring_arc = Arc::new(UringInner(UnsafeCell::new(ring)));
@@ -35,7 +38,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver
         Ok(())
     }
 
-    fn submit(ctx: Arc<CtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
+    fn submit(ctx: Arc<CtxShared<C, Q, W>>, ring_arc: Arc<UringInner>) {
         info!("io_uring submitter thread start");
         let depth = ctx.depth;
         let exit_sent = false;
@@ -136,7 +139,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver
         info!("io_uring submitter thread exit");
     }
 
-    fn complete(ctx: Arc<CtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
+    fn complete(ctx: Arc<CtxShared<C, Q, W>>, ring_arc: Arc<UringInner>) {
         info!("io_uring completer thread start");
 
         let ring = unsafe { &mut *ring_arc.0.get() };
@@ -165,7 +168,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver
                             } else {
                                 event.set_error(-res);
                             }
-                            ctx.cb_workers.send(event);
+                            ctx.cb_workers.done(event);
                         }
                     }
                     if exit_received {

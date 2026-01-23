@@ -9,7 +9,8 @@
 //! - [IOContext`]: The main driver entry point. Manages submission and completion of IO events.
 //! - [IOEvent](crate::tasks::IOEvent): Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
 //! - [IOCallback`]: Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
-//! - [IOWorkers]: Worker threads handling completions.
+//! - [Worker](crate::callback_worker::Worker): Trait for workers handling completions.
+//! - [IOWorkers](crate::callback_worker::IOWorkers): Worker threads handling completions (implements `Worker`).
 //! - **IO Merging**: The engine supports merging sequential IO requests to reduce system call overhead. See the [`merge`] module for details.
 //!
 //! ## Callbacks
@@ -84,10 +85,10 @@
 //!     // 3. Create IOContext (io_uring)
 //!     // worker_num=1, depth=16
 //!     // This spawns the necessary driver threads.
-//!     let _ctx = IOContext::<ClosureCb, _>::new(
+//!     let _ctx = IOContext::<ClosureCb, _, _>::new(
 //!         16,
 //!         rx,
-//!         &IOWorkers::new(1),
+//!         IOWorkers::new(1),
 //!         Driver::Uring
 //!     ).expect("Failed to create context");
 //!

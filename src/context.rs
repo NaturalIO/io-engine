@@ -1,6 +1,4 @@
-// Copyright (c) 2025 NaturalIO
-
-use crate::callback_worker::IOWorkers;
+use crate::callback_worker::Worker;
 use crate::driver::aio::AioDriver;
 use crate::driver::uring::UringDriver; // Import UringDriver
 use crate::tasks::{IOCallback, IOEvent};
@@ -18,35 +16,57 @@ pub enum Driver {
     Uring,
 }
 
-pub(crate) struct CtxShared<C: IOCallback, Q> {
+pub(crate) struct CtxShared<C: IOCallback, Q, W> {
     pub depth: usize,
     pub queue: Q,
-    pub cb_workers: IOWorkers<C>,
+    pub cb_workers: W,
     pub free_slots_count: AtomicUsize,
+    pub _marker: std::marker::PhantomData<C>,
 }
 
-unsafe impl<C: IOCallback, Q: Send> Send for CtxShared<C, Q> {}
-unsafe impl<C: IOCallback, Q: Send> Sync for CtxShared<C, Q> {}
+unsafe impl<C: IOCallback, Q: Send, W: Send> Send for CtxShared<C, Q, W> {}
+unsafe impl<C: IOCallback, Q: Send, W: Send> Sync for CtxShared<C, Q, W> {}
 
-pub struct IOContext<C: IOCallback, Q> {
-    pub(crate) inner: Arc<CtxShared<C, Q>>,
+/// IOContext manages the submission of IO tasks to the underlying driver.
+///
+/// It is generic over the callback type `C`, the submission queue `Q`, and the worker type `W`.
+///
+/// # Channel Selection for `W` (Worker)
+///
+/// When configuring the `IOContext` with a worker `W` (usually a channel sender `cb_workers`),
+/// you should choose the `crossfire` channel type based on your sharing model:
+///
+/// * **Shared Worker (Multiple Contexts):** If you have multiple `IOContext` instances sharing the same
+///   callback worker, use the [IOWorkers](crate::callback_worker::IOWorkers) struct,
+///   or pass `crossfire::MTx` (from `mpsc` or `mpmc` channels) with your custom worker implementation.
+///   This allows multiple producers (contexts) to send completion events to a single consumer (worker).
+///
+/// * **Single Instance (Dedicated Worker):** If you have a single `IOContext` with its own dedicated
+///   callback worker, use `crossfire::Tx` (from `spsc` channels). This is more efficient for single-producer
+///   scenarios.
+///
+/// * **inline callback:** If you have a very light callback logic, you can use [Inline](crate::callback_worker::Inline)
+pub struct IOContext<C: IOCallback, Q, W> {
+    pub(crate) inner: Arc<CtxShared<C, Q, W>>,
 }
 
-impl<C: IOCallback, Q> IOContext<C, Q>
+impl<C: IOCallback, Q, W> IOContext<C, Q, W>
 where
     Q: BlockingRxTrait<IOEvent<C>> + Send + 'static,
+    W: Worker<C> + Send + 'static,
 {
     pub fn new(
         depth: usize,
         queue: Q,
-        cbs: &IOWorkers<C>,
+        cbs: W,
         driver_type: Driver, // New parameter
     ) -> Result<Arc<Self>, io::Error> {
         let inner = Arc::new(CtxShared {
             depth,
             queue,
-            cb_workers: cbs.clone(),
+            cb_workers: cbs,
             free_slots_count: AtomicUsize::new(depth),
+            _marker: std::marker::PhantomData,
         });
 
         match driver_type {
