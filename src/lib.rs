@@ -49,6 +49,8 @@
 //! The engine supports transparent handling of short reads and writes (partial IO).
 //! This is achieved through the `IOEvent` structure which tracks the progress of the operation.
 //!
+//! ### How It Works
+//!
 //! - The `res` field in `IOEvent` (initialized to `i32::MIN`) stores the accumulated bytes transferred
 //!   when `res >= 0`.
 //! - When a driver (`aio` or `uring`) processes an event, it checks if `res >= 0`.
@@ -56,6 +58,80 @@
 //!   length, and file offset based on the bytes already transferred.
 //! - This allows the upper layers or callback mechanisms to re-submit incomplete events
 //!   without manually slicing buffers or updating offsets.
+//!
+//! ### Handling Short IO in Your Code
+//!
+//! When you receive a completed `IOEvent`, you should:
+//!
+//! 1. Call `get_result()` to check how many bytes were actually transferred
+//! 2. Compare with the expected length to detect short IO
+//! 3. If incomplete, create a new oneshot channel, set a new callback, and resubmit the **same** `IOEvent`
+//! 4. The driver will automatically continue from where it left off
+//!
+//! **Important:** Do NOT recreate the `IOEvent` for retries. Reuse the original event.
+//!
+//! ### Example: Handling Short Reads
+//!
+//! ```rust,no_run
+//! use io_engine::tasks::{IOEvent, IOAction, ClosureCb};
+//! use io_buffer::Buffer;
+//! use crossfire::oneshot;
+//! use crossfire::mpsc;
+//! use std::os::fd::RawFd;
+//!
+//! async fn read_full(
+//!     fd: RawFd,
+//!     offset: u64,
+//!     buf: Buffer,
+//!     queue_tx: &crossfire::MTx<mpsc::Array<IOEvent<ClosureCb>>>,
+//! ) -> Result<Buffer, String> {
+//!     let total_len = buf.len();
+//!     let (tx, mut rx) = oneshot::oneshot();
+//!
+//!     // Submit initial read
+//!     let mut event = IOEvent::new(fd, buf, IOAction::Read, offset as i64);
+//!     event.set_callback(ClosureCb(Box::new(move |evt| {
+//!         let _ = tx.send(evt);
+//!     })));
+//!     queue_tx.send(event).expect("submit");
+//!
+//!     loop {
+//!         let mut event = rx.await.map_err(|_| "Channel error")?;
+//!
+//!         // Check result
+//!         let n = event.get_result().map_err(|_| "IO error")?;
+//!
+//!         if n >= total_len {
+//!             // Complete
+//!             let mut buf = event.get_read_result().map_err(|_| "Get buffer error")?;
+//!             buf.set_len(n);
+//!             return Ok(buf);
+//!         }
+//!
+//!         // Short read detected
+//!         // NOTE: In production code, you should check if this is EOF by comparing
+//!         // (offset + n) with the file size to distinguish between:
+//!         // - EOF: reached end of file, return partial data
+//!         // - Short read: temporary condition, retry needed
+//!         // For example:
+//!         // if offset + n >= file_size {
+//!         //     // EOF - return what we have
+//!         //     let mut buf = event.get_read_result()?;
+//!         //     buf.set_len(n);
+//!         //     return Ok(buf);
+//!         // }
+//!
+//!         // Short read but not EOF - retry with new oneshot channel
+//!         let (tx, new_rx) = oneshot::oneshot();
+//!         rx = new_rx;
+//!
+//!         event.set_callback(ClosureCb(Box::new(move |evt| {
+//!             let _ = tx.send(evt);
+//!         })));
+//!         queue_tx.send(event).expect("resubmit");
+//!     }
+//! }
+//! ```
 //!
 //! ## Usage Example (io_uring)
 //!
