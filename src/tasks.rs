@@ -15,35 +15,35 @@ pub enum IOAction {
 }
 
 /// Define your callback with this trait
-pub trait IoCallback: Sized + 'static + Send + Unpin {
+pub trait IOCallback: Sized + 'static + Send + Unpin {
     fn call(self, _event: IOEvent<Self>);
 }
 
 /// Closure callback for IOEvent
 pub struct ClosureCb(pub Box<dyn FnOnce(IOEvent<Self>) + Send + Sync + 'static>);
 
-impl IoCallback for ClosureCb {
+impl IOCallback for ClosureCb {
     fn call(self, event: IOEvent<Self>) {
         (self.0)(event)
     }
 }
 
-pub struct IOEvent<C: IoCallback>(pub Box<IOEvent_<C>>);
+pub struct IOEvent<C: IOCallback>(pub Box<IOEvent_<C>>);
 
-impl<C: IoCallback> Deref for IOEvent<C> {
+impl<C: IOCallback> Deref for IOEvent<C> {
     type Target = IOEvent_<C>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<C: IoCallback> DerefMut for IOEvent<C> {
+impl<C: IOCallback> DerefMut for IOEvent<C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<C: IoCallback> fmt::Debug for IOEvent<C> {
+impl<C: IOCallback> fmt::Debug for IOEvent<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -51,7 +51,7 @@ impl<C: IoCallback> fmt::Debug for IOEvent<C> {
 
 // Carries the information of read/write event
 #[repr(C)]
-pub struct IOEvent_<C: IoCallback> {
+pub struct IOEvent_<C: IOCallback> {
     /// make sure DListNode always in the front.
     /// This is for putting sub_tasks in the link list, without additional allocation.
     pub(crate) node: UnsafeCell<DListNode<Self, ()>>,
@@ -69,19 +69,19 @@ pub struct IOEvent_<C: IoCallback> {
 }
 
 // Implement DListItem for IOEvent_ to allow it to be linked
-unsafe impl<C: IoCallback> DListItem<()> for IOEvent_<C> {
+unsafe impl<C: IOCallback> DListItem<()> for IOEvent_<C> {
     fn get_node(&self) -> &mut DListNode<Self, ()> {
         unsafe { &mut *self.node.get() }
     }
 }
 
-impl<C: IoCallback> fmt::Debug for IOEvent_<C> {
+impl<C: IOCallback> fmt::Debug for IOEvent_<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "offset={} {:?} sub_tasks {} ", self.offset, self.action, self.sub_tasks.len())
     }
 }
 
-impl<C: IoCallback> IOEvent<C> {
+impl<C: IOCallback> IOEvent<C> {
     #[inline]
     pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> IOEvent<C> {
         log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);

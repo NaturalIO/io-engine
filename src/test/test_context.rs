@@ -1,5 +1,5 @@
 use crate::callback_worker::IOWorkers;
-use crate::context::{IOContext, IoEngineType};
+use crate::context::{Driver, IOContext};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossfire::BlockingTxTrait;
@@ -14,8 +14,7 @@ fn test_read_write_aio() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.fd;
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx =
-        IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), IoEngineType::Aio).unwrap();
+    let _ctx = IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), Driver::Aio).unwrap();
 
     let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
     let callback = Box::new(move |event: IOEvent<ClosureCb>| {
@@ -77,8 +76,7 @@ fn test_read_write_uring() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.fd;
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx =
-        IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), IoEngineType::Uring).unwrap();
+    let _ctx = IOContext::<ClosureCb, _>::new(2, rx, &IOWorkers::new(1), Driver::Uring).unwrap();
 
     let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
     let callback = Box::new(move |event: IOEvent<ClosureCb>| {

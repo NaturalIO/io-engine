@@ -3,7 +3,7 @@
 use crate::callback_worker::IOWorkers;
 use crate::driver::aio::AioDriver;
 use crate::driver::uring::UringDriver; // Import UringDriver
-use crate::tasks::{IOEvent, IoCallback};
+use crate::tasks::{IOCallback, IOEvent};
 use crossfire::BlockingRxTrait;
 use std::{
     io,
@@ -13,26 +13,26 @@ use std::{
     },
 };
 
-pub enum IoEngineType {
+pub enum Driver {
     Aio,
     Uring,
 }
 
-pub struct IoCtxShared<C: IoCallback, Q> {
+pub(crate) struct CtxShared<C: IOCallback, Q> {
     pub depth: usize,
     pub queue: Q,
     pub cb_workers: IOWorkers<C>,
     pub free_slots_count: AtomicUsize,
 }
 
-unsafe impl<C: IoCallback, Q: Send> Send for IoCtxShared<C, Q> {}
-unsafe impl<C: IoCallback, Q: Send> Sync for IoCtxShared<C, Q> {}
+unsafe impl<C: IOCallback, Q: Send> Send for CtxShared<C, Q> {}
+unsafe impl<C: IOCallback, Q: Send> Sync for CtxShared<C, Q> {}
 
-pub struct IOContext<C: IoCallback, Q> {
-    pub(crate) inner: Arc<IoCtxShared<C, Q>>,
+pub struct IOContext<C: IOCallback, Q> {
+    pub(crate) inner: Arc<CtxShared<C, Q>>,
 }
 
-impl<C: IoCallback, Q> IOContext<C, Q>
+impl<C: IOCallback, Q> IOContext<C, Q>
 where
     Q: BlockingRxTrait<IOEvent<C>> + Send + 'static,
 {
@@ -40,9 +40,9 @@ where
         depth: usize,
         queue: Q,
         cbs: &IOWorkers<C>,
-        driver_type: IoEngineType, // New parameter
+        driver_type: Driver, // New parameter
     ) -> Result<Arc<Self>, io::Error> {
-        let inner = Arc::new(IoCtxShared {
+        let inner = Arc::new(CtxShared {
             depth,
             queue,
             cb_workers: cbs.clone(),
@@ -50,8 +50,8 @@ where
         });
 
         match driver_type {
-            IoEngineType::Aio => AioDriver::start(inner.clone())?,
-            IoEngineType::Uring => UringDriver::start(inner.clone())?,
+            Driver::Aio => AioDriver::start(inner.clone())?,
+            Driver::Uring => UringDriver::start(inner.clone())?,
         }
 
         Ok(Arc::new(Self { inner }))

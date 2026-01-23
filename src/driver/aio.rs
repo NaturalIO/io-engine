@@ -1,7 +1,7 @@
 use crate::callback_worker::IOWorkers;
 
-use crate::context::IoCtxShared;
-use crate::tasks::{IOAction, IOEvent, IoCallback};
+use crate::context::CtxShared;
+use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::{BlockingRxTrait, Rx, Tx, spsc};
 use nix::errno::Errno;
 use std::collections::VecDeque;
@@ -16,12 +16,12 @@ use std::{
     time::Duration,
 };
 
-pub struct AioSlot<C: IoCallback> {
+pub struct AioSlot<C: IOCallback> {
     pub(crate) iocb: iocb,
     pub(crate) event: Option<IOEvent<C>>,
 }
 
-impl<C: IoCallback> AioSlot<C> {
+impl<C: IOCallback> AioSlot<C> {
     pub fn new(slot_id: u64) -> Self {
         Self { iocb: iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() }, event: None }
     }
@@ -73,21 +73,21 @@ impl<C: IoCallback> AioSlot<C> {
     }
 }
 
-struct AioInner<C: IoCallback> {
+struct AioInner<C: IOCallback> {
     context: aio_context_t,
     slots: UnsafeCell<Vec<AioSlot<C>>>,
     null_file: File, // Moved here
 }
 
-unsafe impl<C: IoCallback> Send for AioInner<C> {}
-unsafe impl<C: IoCallback> Sync for AioInner<C> {}
+unsafe impl<C: IOCallback> Send for AioInner<C> {}
+unsafe impl<C: IOCallback> Sync for AioInner<C> {}
 
-pub struct AioDriver<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>>> {
+pub struct AioDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>> {
     _marker: std::marker::PhantomData<(C, Q)>,
 }
 
-impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C, Q> {
-    pub fn start(ctx: Arc<IoCtxShared<C, Q>>) -> io::Result<()> {
+impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C, Q> {
+    pub fn start(ctx: Arc<CtxShared<C, Q>>) -> io::Result<()> {
         let depth = ctx.depth;
         let mut aio_context: aio_context_t = 0;
         if io_setup(depth as c_long, &mut aio_context) != 0 {
@@ -121,7 +121,7 @@ impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C
     }
 
     fn submit_loop(
-        ctx: Arc<IoCtxShared<C, Q>>, inner: Arc<AioInner<C>>, free_recv: Rx<spsc::Array<u16>>,
+        ctx: Arc<CtxShared<C, Q>>, inner: Arc<AioInner<C>>, free_recv: Rx<spsc::Array<u16>>,
     ) {
         let depth = ctx.depth;
         let mut iocbs = Vec::<*mut iocb>::with_capacity(depth);
@@ -228,7 +228,7 @@ impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C
     }
 
     fn poll_loop(
-        ctx: Arc<IoCtxShared<C, Q>>, inner: Arc<AioInner<C>>, free_sender: Tx<spsc::Array<u16>>,
+        ctx: Arc<CtxShared<C, Q>>, inner: Arc<AioInner<C>>, free_sender: Tx<spsc::Array<u16>>,
     ) {
         let depth = ctx.depth;
         let mut infos = Vec::<io_event>::with_capacity(depth);
@@ -286,7 +286,7 @@ impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> AioDriver<C
     }
 
     #[inline(always)]
-    fn verify_result(ctx: &IoCtxShared<C, Q>, slot: &mut AioSlot<C>, info: &io_event) {
+    fn verify_result(ctx: &CtxShared<C, Q>, slot: &mut AioSlot<C>, info: &io_event) {
         if info.res < 0 {
             println!("set error {:?}", info.res);
             slot.set_error((-info.res) as i32, &ctx.cb_workers);

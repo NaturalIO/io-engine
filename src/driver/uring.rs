@@ -1,5 +1,5 @@
-use crate::context::IoCtxShared;
-use crate::tasks::{IOAction, IOEvent, IOEvent_, IoCallback};
+use crate::context::CtxShared;
+use crate::tasks::{IOAction, IOCallback, IOEvent, IOEvent_};
 use crossfire::BlockingRxTrait;
 use io_uring::{IoUring, opcode, types};
 use log::{error, info};
@@ -7,7 +7,7 @@ use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Du
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
-pub struct UringDriver<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>>> {
+pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>> {
     _marker: PhantomData<(C, Q)>,
 }
 
@@ -16,8 +16,8 @@ struct UringInner(UnsafeCell<IoUring>);
 unsafe impl Send for UringInner {}
 unsafe impl Sync for UringInner {}
 
-impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver<C, Q> {
-    pub fn start(ctx: Arc<IoCtxShared<C, Q>>) -> io::Result<()> {
+impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver<C, Q> {
+    pub fn start(ctx: Arc<CtxShared<C, Q>>) -> io::Result<()> {
         let depth = ctx.depth as u32;
         let ring = IoUring::new(depth.max(2))?;
         let ring_arc = Arc::new(UringInner(UnsafeCell::new(ring)));
@@ -35,7 +35,7 @@ impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver
         Ok(())
     }
 
-    fn submit(ctx: Arc<IoCtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
+    fn submit(ctx: Arc<CtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
         info!("io_uring submitter thread start");
         let depth = ctx.depth;
         let exit_sent = false;
@@ -136,7 +136,7 @@ impl<C: IoCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static> UringDriver
         info!("io_uring submitter thread exit");
     }
 
-    fn complete(ctx: Arc<IoCtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
+    fn complete(ctx: Arc<CtxShared<C, Q>>, ring_arc: Arc<UringInner>) {
         info!("io_uring completer thread start");
 
         let ring = unsafe { &mut *ring_arc.0.get() };

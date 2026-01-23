@@ -39,7 +39,7 @@ use io_buffer::Buffer;
 use std::io;
 use std::os::fd::RawFd;
 
-pub struct EventMergeBuffer<C: IoCallback> {
+pub struct EventMergeBuffer<C: IOCallback> {
     pub merge_size_limit: usize,
     merged_events: DLinkedList<Box<IOEvent_<C>>, ()>,
     merged_offset: i64,
@@ -47,7 +47,7 @@ pub struct EventMergeBuffer<C: IoCallback> {
     merged_count: usize,
 }
 
-impl<C: IoCallback> EventMergeBuffer<C> {
+impl<C: IOCallback> EventMergeBuffer<C> {
     pub fn new(merge_size_limit: usize) -> Self {
         Self {
             merge_size_limit,
@@ -116,14 +116,14 @@ impl<C: IoCallback> EventMergeBuffer<C> {
 /// Try to merge sequential IOEvent.
 ///
 /// NOTE: Assuming all the IOEvents are of the same file, only debug mode will do validation.
-pub struct IOMergeSubmitter<C: IoCallback, S: BlockingTxTrait<IOEvent<C>>> {
+pub struct IOMergeSubmitter<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> {
     fd: RawFd,
     buffer: EventMergeBuffer<C>,
     sender: S,
     action: IOAction,
 }
 
-impl<C: IoCallback, S: BlockingTxTrait<IOEvent<C>>> IOMergeSubmitter<C, S> {
+impl<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> IOMergeSubmitter<C, S> {
     pub fn new(fd: RawFd, sender: S, merge_size_limit: usize, action: IOAction) -> Self {
         log_assert!(merge_size_limit > 0);
         Self { fd, buffer: EventMergeBuffer::<C>::new(merge_size_limit), sender, action }
