@@ -31,17 +31,27 @@ impl<C: IoCallback> AioSlot<C> {
         let iocb = &mut self.iocb;
         iocb.aio_data = slot_id as libc::__u64;
         iocb.aio_fildes = event.fd as libc::__u32;
+
         if let Some(buf) = event.buf.as_ref() {
             iocb.aio_lio_opcode = event.action as u16;
-            iocb.aio_buf = buf.get_raw() as u64;
-            iocb.aio_nbytes = buf.len() as u64;
+
+            if event.res > 0 {
+                let progress = event.res as u64;
+                iocb.aio_buf = (buf.get_raw() as u64) + progress;
+                iocb.aio_nbytes = (buf.len() as u64) - progress;
+                iocb.aio_offset = event.offset + (progress as i64);
+            } else {
+                iocb.aio_buf = buf.get_raw() as u64;
+                iocb.aio_nbytes = buf.len() as u64;
+                iocb.aio_offset = event.offset;
+            }
         } else {
             // Zero-length read for exit signal
             iocb.aio_lio_opcode = IOAction::Read as u16;
             iocb.aio_buf = 0;
             iocb.aio_nbytes = 0;
+            iocb.aio_offset = event.offset;
         }
-        iocb.aio_offset = event.offset;
         self.event.replace(event);
     }
 

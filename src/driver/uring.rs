@@ -92,10 +92,22 @@ impl<C: IoCallback, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static> UringD
                     for event in events {
                         let event = event;
                         let fd = event.fd;
-                        let offset = event.offset as u64;
                         let buf_slice = event.get_buf_ref();
-                        let buf_len = buf_slice.len() as u32;
-                        let buf_ptr = buf_slice.as_ptr() as *mut u8;
+
+                        let (offset, buf_ptr, buf_len) = if event.res > 0 {
+                            let progress = event.res as u64;
+                            (
+                                event.offset as u64 + progress,
+                                unsafe { (buf_slice.as_ptr() as *mut u8).add(progress as usize) },
+                                (buf_slice.len() as u64 - progress) as u32,
+                            )
+                        } else {
+                            (
+                                event.offset as u64,
+                                buf_slice.as_ptr() as *mut u8,
+                                buf_slice.len() as u32,
+                            )
+                        };
 
                         let sqe = match event.action {
                             IOAction::Read => opcode::Read::new(types::Fd(fd), buf_ptr, buf_len)
