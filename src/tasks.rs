@@ -145,12 +145,28 @@ impl<C: IOCallback> IOEvent<C> {
         }
     }
 
+    /// Get the result of the IO operation (bytes read/written or error).
+    /// Returns the number of bytes successfully transferred.
+    #[inline(always)]
+    pub fn get_result(&self) -> Result<usize, Errno> {
+        let res = self.res;
+        if res >= 0 {
+            return Ok(res as usize);
+        } else if res == i32::MIN {
+            panic!("IOEvent get_result before it's done");
+        } else {
+            return Err(Errno::from_raw(-res));
+        }
+    }
+
+    /// Get the buffer from a read operation.
+    /// Note: The buffer length is NOT modified. Use `get_result()` to get actual bytes read.
     #[inline(always)]
     pub fn get_read_result(mut self) -> Result<Buffer, Errno> {
         let res = self.res;
         if res >= 0 {
-            let mut buf = self.buf.take().unwrap();
-            buf.set_len(res as usize);
+            let buf = self.buf.take().unwrap();
+            // Do NOT modify buffer length - caller should use get_result() to know actual bytes read
             return Ok(buf);
         } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");

@@ -27,11 +27,13 @@ fn test_read_write_aio() {
     tx.send(event).expect("submit");
     let event = done_rx.recv().unwrap();
     assert!(event.is_done());
+    // Get actual bytes read
+    let n = event.get_result().unwrap();
     match event.get_read_result() {
         Ok(_buffer2) => {
             // NOTE: although the offset is not aligned,
             // Read the file out of boundary gets res=0
-            assert_eq!(_buffer2.len(), 0);
+            assert_eq!(n, 0);
         }
         Err(e) => {
             panic!("unexpected error {}", e);
@@ -56,8 +58,12 @@ fn test_read_write_aio() {
             tx.send(event).expect("submit");
             let event = done_rx.recv().unwrap();
             assert!(event.is_done());
+            // Get bytes read first before consuming event
+            let n = event.get_result().unwrap();
             match event.get_read_result() {
-                Ok(_buffer2) => {
+                Ok(mut _buffer2) => {
+                    // Set buffer length based on actual bytes read
+                    _buffer2.set_len(n);
                     let _digest = md5::compute(&_buffer2);
                     assert_eq!(_digest, digest);
                 }
@@ -89,10 +95,12 @@ fn test_read_write_uring() {
     tx.send(event).expect("submit");
     let event = done_rx.recv().unwrap();
     assert!(event.is_done());
+    // Get actual bytes read
+    let n = event.get_result().unwrap();
     match event.get_read_result() {
         Ok(_buffer2) => {
             // short read reached EOF
-            assert_eq!(_buffer2.len(), 0);
+            assert_eq!(n, 0);
         }
         Err(e) => {
             unreachable!("error: {}", e);
@@ -123,8 +131,12 @@ fn test_read_write_uring() {
             tx.send(event).expect("submit");
             let event = done_rx.recv().unwrap();
             assert!(event.is_done());
+            // Get bytes read first before consuming event
+            let n = event.get_result().unwrap();
             match event.get_read_result() {
-                Ok(_buffer2) => {
+                Ok(mut _buffer2) => {
+                    // Set buffer length based on actual bytes read
+                    _buffer2.set_len(n);
                     let _digest = md5::compute(&_buffer2);
                     assert_eq!(_digest, digest);
                 }
