@@ -109,17 +109,17 @@ impl<C: IOCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn push_to_list(self, events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) {
+    pub(crate) fn push_to_list(self, events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) {
         events.push_back(self.0);
     }
 
     #[inline(always)]
-    pub fn pop_from_list(events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
+    pub(crate) fn pop_from_list(events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
         events.pop_front().map(IOEvent)
     }
 
     #[inline(always)]
-    pub fn set_subtasks(&mut self, sub_tasks: DLinkedList<Box<IOEvent_<C>>, ()>) {
+    pub(crate) fn set_subtasks(&mut self, sub_tasks: DLinkedList<Box<IOEvent_<C>>, ()>) {
         self.sub_tasks = sub_tasks;
     }
 
@@ -197,6 +197,8 @@ impl<C: IOCallback> IOEvent<C> {
         }
     }
 
+    /// Trigger the callback for this IOEvent.
+    /// This consumes the event and calls the associated callback.
     #[inline(always)]
     pub(crate) fn callback(mut self) {
         match self.cb.take() {
@@ -207,21 +209,19 @@ impl<C: IOCallback> IOEvent<C> {
         }
     }
 
+    /// For writing custom callback workers
+    ///
+    /// Callback worker should always call this function on receiving IOEvent from Driver
     #[inline(always)]
-    pub(crate) fn callback_merged(mut self) {
-        // sub_tasks is not Option anymore, but DLinkedList.
-        // We can check if it's empty.
-        // Use std::mem::take if DLinkedList implements Default (it usually refers to new which is empty).
-        // Or check if it is empty. DLinkedList::new() creates empty list.
-        let mut tasks = std::mem::replace(&mut self.sub_tasks, DLinkedList::new());
-
-        if !tasks.is_empty() {
+    pub fn callback_merged(mut self) {
+        if !self.sub_tasks.is_empty() {
             let res = self.res;
             if res >= 0 {
                 if self.action == IOAction::Read {
                     let buffer = self.buf.take().unwrap();
                     let mut b = buffer.as_ref();
-                    while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                    for event_box in self.sub_tasks.drain() {
+                        let mut event = IOEvent(event_box);
                         let sub_buf = event.buf.as_mut().unwrap();
                         if b.len() == 0 {
                             // short read
@@ -235,7 +235,8 @@ impl<C: IOCallback> IOEvent<C> {
                     }
                 } else {
                     let l = self.buf.as_ref().unwrap().len();
-                    while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                    for event_box in self.sub_tasks.drain() {
+                        let mut event = IOEvent(event_box);
                         let mut sub_len = event.get_size();
                         if sub_len > l {
                             // short write
@@ -247,7 +248,8 @@ impl<C: IOCallback> IOEvent<C> {
                 }
             } else {
                 let errno = -res;
-                while let Some(mut event) = Self::pop_from_list(&mut tasks) {
+                for event_box in self.sub_tasks.drain() {
+                    let mut event = IOEvent(event_box);
                     event.set_error(errno);
                     event.callback();
                 }
