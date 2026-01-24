@@ -34,14 +34,14 @@
 
 use crate::tasks::*;
 use crossfire::BlockingTxTrait;
-use embed_collections::dlist::DLinkedList;
+use embed_collections::slist::SLinkedList;
 use io_buffer::Buffer;
 use std::io;
 use std::os::fd::RawFd;
 
 pub struct EventMergeBuffer<C: IOCallback> {
     pub merge_size_limit: usize,
-    merged_events: DLinkedList<Box<IOEvent_<C>>, ()>,
+    merged_events: SLinkedList<Box<IOEvent_<C>>, ()>,
     merged_offset: i64,
     merged_data_size: usize,
     merged_count: usize,
@@ -52,7 +52,7 @@ impl<C: IOCallback> EventMergeBuffer<C> {
         Self {
             merge_size_limit,
             merged_count: 0,
-            merged_events: DLinkedList::new(),
+            merged_events: SLinkedList::new(),
             merged_offset: -1,
             merged_data_size: 0,
         }
@@ -89,10 +89,10 @@ impl<C: IOCallback> EventMergeBuffer<C> {
     }
 
     #[inline(always)]
-    pub fn take(&mut self) -> (DLinkedList<Box<IOEvent_<C>>, ()>, i64, usize) {
+    pub fn take(&mut self) -> (SLinkedList<Box<IOEvent_<C>>, ()>, i64, usize) {
         log_debug_assert!(self.merged_count > 1, "merged_count {}", self.merged_count);
         // Move the list content out by swapping with empty new list
-        let tasks = std::mem::replace(&mut self.merged_events, DLinkedList::new());
+        let tasks = std::mem::replace(&mut self.merged_events, SLinkedList::new());
         let merged_data_size = self.merged_data_size;
         let merged_offset = self.merged_offset;
 

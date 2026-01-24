@@ -5,7 +5,7 @@ use std::os::fd::RawFd;
 
 use nix::errno::Errno;
 
-use embed_collections::dlist::{DLinkedList, DListItem, DListNode};
+use embed_collections::slist::{SLinkedList, SListItem, SListNode};
 use io_buffer::{Buffer, safe_copy};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -52,9 +52,9 @@ impl<C: IOCallback> fmt::Debug for IOEvent<C> {
 // Carries the information of read/write event
 #[repr(C)]
 pub struct IOEvent_<C: IOCallback> {
-    /// make sure DListNode always in the front.
+    /// make sure SListNode always in the front.
     /// This is for putting sub_tasks in the link list, without additional allocation.
-    pub(crate) node: UnsafeCell<DListNode<Self, ()>>,
+    pub(crate) node: UnsafeCell<SListNode<Self, ()>>,
     pub buf: Option<Buffer>,
     pub offset: i64,
     pub action: IOAction,
@@ -65,12 +65,12 @@ pub struct IOEvent_<C: IOCallback> {
     /// < 0: Error code (negative errno).
     pub(crate) res: i32,
     cb: Option<C>,
-    sub_tasks: DLinkedList<Box<Self>, ()>,
+    sub_tasks: SLinkedList<Box<Self>, ()>,
 }
 
-// Implement DListItem for IOEvent_ to allow it to be linked
-unsafe impl<C: IOCallback> DListItem<()> for IOEvent_<C> {
-    fn get_node(&self) -> &mut DListNode<Self, ()> {
+// Implement SListItem for IOEvent_ to allow it to be linked
+unsafe impl<C: IOCallback> SListItem<()> for IOEvent_<C> {
+    fn get_node(&self) -> &mut SListNode<Self, ()> {
         unsafe { &mut *self.node.get() }
     }
 }
@@ -92,8 +92,8 @@ impl<C: IOCallback> IOEvent<C> {
             offset,
             res: i32::MIN,
             cb: None,
-            sub_tasks: DLinkedList::new(),
-            node: UnsafeCell::new(DListNode::default()),
+            sub_tasks: SLinkedList::new(),
+            node: UnsafeCell::new(SListNode::default()),
         }))
     }
 
@@ -109,17 +109,17 @@ impl<C: IOCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub(crate) fn push_to_list(self, events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) {
+    pub(crate) fn push_to_list(self, events: &mut SLinkedList<Box<IOEvent_<C>>, ()>) {
         events.push_back(self.0);
     }
 
     #[inline(always)]
-    pub(crate) fn pop_from_list(events: &mut DLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
+    pub(crate) fn pop_from_list(events: &mut SLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
         events.pop_front().map(IOEvent)
     }
 
     #[inline(always)]
-    pub(crate) fn set_subtasks(&mut self, sub_tasks: DLinkedList<Box<IOEvent_<C>>, ()>) {
+    pub(crate) fn set_subtasks(&mut self, sub_tasks: SLinkedList<Box<IOEvent_<C>>, ()>) {
         self.sub_tasks = sub_tasks;
     }
 
@@ -263,14 +263,14 @@ impl<C: IOCallback> IOEvent<C> {
     pub(crate) fn new_exit_signal(fd: RawFd) -> Self {
         // Exit signal wraps a IOEvent
         Self(Box::new(IOEvent_ {
-            node: UnsafeCell::new(DListNode::default()),
+            node: UnsafeCell::new(SListNode::default()),
             buf: None,
             offset: 0,
             action: IOAction::Read, // Exit signal is a read
             fd,
             res: i32::MIN,
             cb: None, // No callback for exit signal
-            sub_tasks: DLinkedList::new(),
+            sub_tasks: SLinkedList::new(),
         }))
     }
 }

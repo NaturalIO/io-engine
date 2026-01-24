@@ -21,7 +21,7 @@ captains-log = "0.4"
 io-buffer = "1"
 crossfire = "3.0"
 io-uring = "0.7"
-embed-collections = "^0.1.5"
+embed-collections = { version="^0.1.5", default-features=false, features = ["slist"] }
 
 [dev-dependencies]
 rand = "0.9"
