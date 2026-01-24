@@ -202,3 +202,65 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + Sy
         assert_eq!(md51, md5::compute(read_buf.lock().unwrap().as_ref()));
     });
 }
+
+#[test]
+fn test_event_merge_buffer_logic() {
+    setup_log();
+    let merge_size_limit = 4 * 1024;
+    let mut buffer = crate::merge::EventMergeBuffer::<ClosureCb>::new(merge_size_limit);
+
+    let fd = 100; // Dummy fd
+
+    // --- Scenario 1: Add contiguous events ---
+    // Event 1: offset 0, size 1KB
+    let event1 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
+
+    assert!(buffer.may_add_event(&event1));
+    let is_full = buffer.push_event(event1);
+    assert!(!is_full);
+    assert_eq!(buffer.len(), 1);
+
+    // Event 2: offset 1KB, size 1KB (contiguous)
+    let event2 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 1024);
+
+    assert!(buffer.may_add_event(&event2));
+    let is_full = buffer.push_event(event2);
+    assert!(!is_full);
+    assert_eq!(buffer.len(), 2);
+
+    // --- Scenario 2: Add non-contiguous event ---
+    // Event 3: offset 3KB, size 1KB (non-contiguous)
+    let event3 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 3072);
+
+    assert!(!buffer.may_add_event(&event3));
+
+    // Now, let's take the buffered events and check them
+    assert_eq!(buffer.len(), 2);
+    let (mut _taken_events, offset, size) = buffer.take();
+    assert_eq!(offset, 0);
+    assert_eq!(size, 2048);
+    assert_eq!(_taken_events.len(), 2);
+    assert_eq!(buffer.len(), 0);
+
+    // The buffer is now empty. We can add event3.
+    assert!(buffer.may_add_event(&event3));
+    let is_full = buffer.push_event(event3);
+    assert!(!is_full);
+    assert_eq!(buffer.len(), 1);
+
+    // --- Scenario 3: Add event that makes buffer full ---
+    // Event 4: offset 4096, size 3072. Contiguous with event3 (offset 3072, size 1024).
+    // Total size would be 1024 + 3072 = 4096, which is exactly merge_size_limit
+    let event4 = IOEvent::new(fd, Buffer::aligned(3072).unwrap(), IOAction::Write, 4096);
+
+    assert!(buffer.may_add_event(&event4));
+    let is_full = buffer.push_event(event4);
+    assert!(is_full);
+    assert_eq!(buffer.len(), 2);
+
+    let (mut _taken_events_2, offset_2, size_2) = buffer.take();
+    assert_eq!(offset_2, 3072);
+    assert_eq!(size_2, 4096);
+    assert_eq!(_taken_events_2.len(), 2);
+    assert_eq!(buffer.len(), 0);
+}
