@@ -4,8 +4,11 @@ mod test_context;
 mod test_merge;
 mod test_task;
 
+use libc;
 use rand::prelude::*;
-use std::os::unix::{ffi::OsStrExt, io::RawFd};
+use std::fs::OpenOptions;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path;
 
 pub struct TempDevFile(pub String);
@@ -46,33 +49,14 @@ pub fn setup_log() {
     log_config.build().expect("setup_log");
 }
 
-pub struct OwnedFd {
-    pub fd: RawFd,
-}
-
-impl OwnedFd {
-    fn new_from_raw_fd(fd: RawFd) -> OwnedFd {
-        OwnedFd { fd }
-    }
-}
-
-impl Drop for OwnedFd {
-    fn drop(&mut self) {
-        let result = unsafe { libc::close(self.fd) };
-        assert!(result == 0);
-    }
-}
-
 // Create a temporary file with some content
 pub fn create_temp_file(path: &path::Path) -> OwnedFd {
-    OwnedFd::new_from_raw_fd(unsafe {
-        let fd = libc::open(
-            std::mem::transmute(path.as_os_str().as_bytes().as_ptr()),
-            libc::O_DIRECT | libc::O_RDWR | libc::O_CREAT,
-        );
-        if fd < 0 {
-            panic!("create file {} errno={}", path.display(), nix::errno::Errno::last_raw());
-        }
-        fd
-    })
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)
+        .expect("openfile")
+        .into()
 }

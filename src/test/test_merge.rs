@@ -2,7 +2,7 @@ use crate::callback_worker::IOWorkers;
 use crate::context::{Driver, IOContext};
 use crate::merge::IOMergeSubmitter;
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -19,8 +19,8 @@ fn test_merged_submit_aio() {
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
 
-    println!("created temp file fd={}", owned_fd.fd);
-    let fd = owned_fd.fd;
+    println!("created temp file fd={}", owned_fd.as_raw_fd());
+    let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
     let _ctx = IOContext::<ClosureCb, _, _>::new(128, rx, IOWorkers::new(2), Driver::Aio).unwrap();
 
@@ -41,8 +41,8 @@ fn test_merged_submit_uring() {
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
 
-    println!("created temp file fd={}", owned_fd.fd);
-    let fd = owned_fd.fd;
+    let fd = owned_fd.as_raw_fd();
+    println!("created temp file fd={}", fd);
     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
     let _ctx =
         IOContext::<ClosureCb, _, _>::new(128, rx, IOWorkers::new(2), Driver::Uring).unwrap();

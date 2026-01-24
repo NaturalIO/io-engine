@@ -4,6 +4,7 @@ use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossfire::BlockingTxTrait;
 use io_buffer::{Buffer, rand_buffer};
+use std::os::fd::AsRawFd;
 use std::sync::mpsc::channel as unbounded;
 extern crate md5;
 
@@ -12,7 +13,7 @@ fn test_read_write_aio() {
     setup_log();
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
-    let fd = owned_fd.fd;
+    let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
     let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
 
@@ -80,7 +81,7 @@ fn test_read_write_uring() {
     setup_log();
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
-    let fd = owned_fd.fd;
+    let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
     let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
