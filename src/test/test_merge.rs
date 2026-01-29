@@ -1,6 +1,6 @@
 use crate::callback_worker::IOWorkers;
 use crate::context::{Driver, IOContext};
-use crate::merge::IOMergeSubmitter;
+use crate::merge::MergeSubmitter;
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use std::os::fd::{AsRawFd, RawFd};
 use std::{
@@ -62,12 +62,8 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + Sy
     fd: RawFd, sender: S, io_size: usize, batch_num: usize, merge_size_limit: usize,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
-    let mut m_write = IOMergeSubmitter::<ClosureCb, _>::new(
-        fd,
-        sender.clone(),
-        merge_size_limit,
-        IOAction::Write,
-    );
+    let mut m_write =
+        MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Write);
 
     let rt =
         tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(4).build().unwrap();
@@ -119,7 +115,7 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + Sy
         // TODO assert f.size
 
         let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-        let mut m_read = IOMergeSubmitter::<ClosureCb, _>::new(
+        let mut m_read = MergeSubmitter::<ClosureCb, _>::new(
             fd,
             sender.clone(),
             merge_size_limit,
@@ -207,60 +203,74 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + Sy
 fn test_event_merge_buffer_logic() {
     setup_log();
     let merge_size_limit = 4 * 1024;
-    let mut buffer = crate::merge::EventMergeBuffer::<ClosureCb>::new(merge_size_limit);
+    let mut buffer = crate::merge::MergeBuffer::<ClosureCb>::new(merge_size_limit);
 
     let fd = 100; // Dummy fd
 
-    // --- Scenario 1: Add contiguous events ---
-    // Event 1: offset 0, size 1KB
-    let event1 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
-
-    assert!(buffer.may_add_event(&event1));
-    let is_full = buffer.push_event(event1);
-    assert!(!is_full);
-    assert_eq!(buffer.len(), 1);
-
-    // Event 2: offset 1KB, size 1KB (contiguous)
-    let event2 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 1024);
-
-    assert!(buffer.may_add_event(&event2));
-    let is_full = buffer.push_event(event2);
-    assert!(!is_full);
-    assert_eq!(buffer.len(), 2);
-
-    // --- Scenario 2: Add non-contiguous event ---
-    // Event 3: offset 3KB, size 1KB (non-contiguous)
-    let event3 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 3072);
-
-    assert!(!buffer.may_add_event(&event3));
-
-    // Now, let's take the buffered events and check them
-    assert_eq!(buffer.len(), 2);
-    let (mut _taken_events, offset, size) = buffer.take();
-    assert_eq!(offset, 0);
-    assert_eq!(size, 2048);
-    assert_eq!(_taken_events.len(), 2);
+    // --- Test empty flush ---
+    assert!(buffer.flush(fd, IOAction::Write).is_none());
     assert_eq!(buffer.len(), 0);
 
-    // The buffer is now empty. We can add event3.
-    assert!(buffer.may_add_event(&event3));
-    let is_full = buffer.push_event(event3);
-    assert!(!is_full);
+    // --- Scenario 1: Add a single event ---
+    let event1 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
+    // clone for later comparison
+    let event1_clone: IOEvent<ClosureCb> =
+        IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
+    assert!(buffer.may_add_event(&event1));
+    buffer.push_event(event1);
     assert_eq!(buffer.len(), 1);
 
-    // --- Scenario 3: Add event that makes buffer full ---
-    // Event 4: offset 4096, size 3072. Contiguous with event3 (offset 3072, size 1024).
-    // Total size would be 1024 + 3072 = 4096, which is exactly merge_size_limit
-    let event4 = IOEvent::new(fd, Buffer::aligned(3072).unwrap(), IOAction::Write, 4096);
+    // Flush single event
+    let single_event_opt = buffer.flush(fd, IOAction::Write);
+    assert!(single_event_opt.is_some());
+    let single_event = single_event_opt.unwrap();
+    assert_eq!(single_event.offset, event1_clone.offset);
+    assert_eq!(single_event.get_size(), event1_clone.get_size());
+    assert_eq!(buffer.len(), 0);
 
+    // --- Scenario 2: Add contiguous events ---
+    // Event 2: offset 0, size 1KB
+    let event2 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
+    buffer.push_event(event2);
+
+    // Event 3: offset 1KB, size 1KB (contiguous)
+    let event3 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 1024);
+    buffer.push_event(event3);
+    assert_eq!(buffer.len(), 2);
+
+    // --- Scenario 3: Add non-contiguous event ---
+    // Event 4: offset 3KB, size 1KB (non-contiguous)
+    let event4 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 3072);
+    assert!(!buffer.may_add_event(&event4));
+
+    // Now, flush the buffered events and check them
+    assert_eq!(buffer.len(), 2);
+    let merged_event_opt = buffer.flush(fd, IOAction::Write);
+    assert!(merged_event_opt.is_some());
+    let merged_event = merged_event_opt.unwrap();
+    assert_eq!(merged_event.offset, 0);
+    assert_eq!(merged_event.get_size(), 2048);
+    assert_eq!(buffer.len(), 0);
+
+    // The buffer is now empty. We can add event4.
     assert!(buffer.may_add_event(&event4));
-    let is_full = buffer.push_event(event4);
+    buffer.push_event(event4);
+    assert_eq!(buffer.len(), 1);
+
+    // --- Scenario 4: Add event that makes buffer full ---
+    // Event 5: offset 4096, size 3072. Contiguous with event4 (offset 3072, size 1024).
+    // Total size would be 1024 + 3072 = 4096, which is exactly merge_size_limit
+    let event5 = IOEvent::new(fd, Buffer::aligned(3072).unwrap(), IOAction::Write, 4096);
+
+    assert!(buffer.may_add_event(&event5));
+    let is_full = buffer.push_event(event5);
     assert!(is_full);
     assert_eq!(buffer.len(), 2);
 
-    let (mut _taken_events_2, offset_2, size_2) = buffer.take();
-    assert_eq!(offset_2, 3072);
-    assert_eq!(size_2, 4096);
-    assert_eq!(_taken_events_2.len(), 2);
+    let merged_event_opt_2 = buffer.flush(fd, IOAction::Write);
+    assert!(merged_event_opt_2.is_some());
+    let merged_event_2 = merged_event_opt_2.unwrap();
+    assert_eq!(merged_event_2.offset, 3072);
+    assert_eq!(merged_event_2.get_size(), 4096);
     assert_eq!(buffer.len(), 0);
 }
