@@ -43,7 +43,7 @@ use std::os::fd::RawFd;
 /// Buffers sequential IO events for merging.
 ///
 /// This internal component collects [`IOEvent`]s,
-/// pressuming the same IO action and file descriptor (it does not check),
+/// presuming the same IO action and file descriptor (it does not check),
 /// the merge upper bound is specified in `merge_size_limit`.
 pub struct MergeBuffer<C: IOCallback> {
     pub merge_size_limit: usize,
@@ -150,6 +150,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// - If there are multiple events, it attempts to merge them:
     ///   - If successful, a new master [`IOEvent`] covering the merged range is returned as `Some(merged_event)`.
     ///   - If buffer allocation for the merged event fails, all original events are marked with an `ENOMEM` error and their callbacks are triggered, then `None` is returned.
+    /// - This function will always override fd in IOEvent with argument
     ///
     /// After flushing, the buffer is reset.
     ///
@@ -162,17 +163,17 @@ impl<C: IOCallback> MergeBuffer<C> {
     #[inline]
     pub fn flush(&mut self, fd: RawFd, action: IOAction) -> Option<IOEvent<C>> {
         let batch_len = self.len();
-
         if batch_len == 0 {
             return None;
         }
-
         if batch_len == 1 {
             self.merged_offset = -1;
             self.merged_data_size = 0;
-            return IOEvent::pop_from_list(&mut self.merged_events);
+            let mut event = IOEvent::pop_from_list(&mut self.merged_events).unwrap();
+            // NOTE: always reset fd, allow false fd while adding
+            event.set_fd(fd);
+            return Some(event);
         }
-
         let (mut tasks, offset, size) = self.take();
         log_assert!(size > 0);
 

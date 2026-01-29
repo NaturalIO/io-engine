@@ -97,6 +97,11 @@ impl<C: IOCallback> IOEvent<C> {
         }))
     }
 
+    #[inline(always)]
+    pub fn set_fd(&mut self, fd: RawFd) {
+        self.fd = fd;
+    }
+
     /// Set callback for IOEvent, might be closure or a custom struct
     #[inline(always)]
     pub fn set_callback(&mut self, cb: C) {
