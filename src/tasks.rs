@@ -8,10 +8,17 @@ use nix::errno::Errno;
 use embed_collections::slist::{SLinkedList, SListItem, SListNode};
 use io_buffer::{Buffer, safe_copy};
 
+pub enum BufOrLen {
+    Buffer(Buffer),
+    Len(u64),
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum IOAction {
     Read = 0,
     Write = 1,
+    Alloc = 2,
+    Fsync = 3,
 }
 
 /// Define your callback with this trait
@@ -55,7 +62,7 @@ pub struct IOEvent_<C: IOCallback> {
     /// make sure SListNode always in the front.
     /// This is for putting sub_tasks in the link list, without additional allocation.
     pub(crate) node: UnsafeCell<SListNode<Self, ()>>,
-    pub buf: Option<Buffer>,
+    pub buf_or_len: BufOrLen,
     pub offset: i64,
     pub action: IOAction,
     pub fd: RawFd,
@@ -77,7 +84,7 @@ unsafe impl<C: IOCallback> SListItem<()> for IOEvent_<C> {
 
 impl<C: IOCallback> fmt::Debug for IOEvent_<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "offset={} {:?} sub_tasks {} ", self.offset, self.action, self.sub_tasks.len())
+        write!(f, "offset={} {:?} sub_tasks {}", self.offset, self.action, self.sub_tasks.len())
     }
 }
 
@@ -86,7 +93,21 @@ impl<C: IOCallback> IOEvent<C> {
     pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> IOEvent<C> {
         log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);
         IOEvent(Box::new(IOEvent_ {
-            buf: Some(buf),
+            buf_or_len: BufOrLen::Buffer(buf),
+            fd,
+            action,
+            offset,
+            res: i32::MIN,
+            cb: None,
+            sub_tasks: SLinkedList::new(),
+            node: UnsafeCell::new(SListNode::default()),
+        }))
+    }
+
+    #[inline]
+    pub fn new_no_buf(fd: RawFd, action: IOAction, offset: i64, len: u64) -> IOEvent<C> {
+        IOEvent(Box::new(IOEvent_ {
+            buf_or_len: BufOrLen::Len(len), // No buffer for this action
             fd,
             action,
             offset,
@@ -110,7 +131,7 @@ impl<C: IOCallback> IOEvent<C> {
 
     #[inline(always)]
     pub fn get_size(&self) -> usize {
-        self.buf.as_ref().unwrap().len()
+        if let BufOrLen::Buffer(buf) = &self.buf_or_len { buf.len() } else { 0 }
     }
 
     #[inline(always)]
@@ -130,7 +151,11 @@ impl<C: IOCallback> IOEvent<C> {
 
     #[inline(always)]
     pub fn get_buf_ref<'a>(&'a self) -> &'a [u8] {
-        self.buf.as_ref().unwrap().as_ref()
+        if let BufOrLen::Buffer(buf) = &self.buf_or_len {
+            buf.as_ref()
+        } else {
+            panic!("get_buf_ref called on IOEvent with no buffer");
+        }
     }
 
     #[inline(always)]
@@ -170,9 +195,13 @@ impl<C: IOCallback> IOEvent<C> {
     pub fn get_read_result(mut self) -> Result<Buffer, Errno> {
         let res = self.res;
         if res >= 0 {
-            let buf = self.buf.take().unwrap();
-            // Do NOT modify buffer length - caller should use get_result() to know actual bytes read
-            return Ok(buf);
+            let buf_or_len = std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0));
+            if let BufOrLen::Buffer(buf) = buf_or_len {
+                // Do NOT modify buffer length - caller should use get_result() to know actual bytes read
+                return Ok(buf);
+            } else {
+                panic!("get_read_result called on IOEvent with no buffer");
+            }
         } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
@@ -223,23 +252,26 @@ impl<C: IOCallback> IOEvent<C> {
             let res = self.res;
             if res >= 0 {
                 if self.action == IOAction::Read {
-                    let buffer = self.buf.take().unwrap();
-                    let mut b = buffer.as_ref();
-                    for event_box in self.sub_tasks.drain() {
-                        let mut event = IOEvent(event_box);
-                        let sub_buf = event.buf.as_mut().unwrap();
-                        if b.len() == 0 {
-                            // short read
-                            event.set_copied(0);
-                        } else {
-                            let copied = safe_copy(sub_buf, b);
-                            event.set_copied(copied);
-                            b = &b[copied..];
+                    let buf_or_len = std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0));
+                    if let BufOrLen::Buffer(buffer) = buf_or_len {
+                        let mut b = buffer.as_ref();
+                        for event_box in self.sub_tasks.drain() {
+                            let mut event = IOEvent(event_box);
+                            if let BufOrLen::Buffer(sub_buf) = &mut event.buf_or_len {
+                                if b.len() == 0 {
+                                    // short read
+                                    event.set_copied(0);
+                                } else {
+                                    let copied = safe_copy(sub_buf, b);
+                                    event.set_copied(copied);
+                                    b = &b[copied..];
+                                }
+                            }
+                            event.callback();
                         }
-                        event.callback();
                     }
                 } else {
-                    let l = self.buf.as_ref().unwrap().len();
+                    let l = self.get_size();
                     for event_box in self.sub_tasks.drain() {
                         let mut event = IOEvent(event_box);
                         let mut sub_len = event.get_size();
@@ -269,7 +301,7 @@ impl<C: IOCallback> IOEvent<C> {
         // Exit signal wraps a IOEvent
         Self(Box::new(IOEvent_ {
             node: UnsafeCell::new(SListNode::default()),
-            buf: None,
+            buf_or_len: BufOrLen::Len(0),
             offset: 0,
             action: IOAction::Read, // Exit signal is a read
             fd,

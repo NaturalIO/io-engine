@@ -1,7 +1,7 @@
 use crate::callback_worker::Worker;
 
 use crate::context::CtxShared;
-use crate::tasks::{IOAction, IOCallback, IOEvent};
+use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent};
 use crossfire::{BlockingRxTrait, Rx, Tx, spsc};
 use nix::errno::Errno;
 use std::collections::VecDeque;
@@ -32,25 +32,33 @@ impl<C: IOCallback> AioSlot<C> {
         iocb.aio_data = slot_id as libc::__u64;
         iocb.aio_fildes = event.fd as libc::__u32;
 
-        if let Some(buf) = event.buf.as_ref() {
-            iocb.aio_lio_opcode = event.action as u16;
+        match &event.buf_or_len {
+            BufOrLen::Buffer(buf) => {
+                iocb.aio_lio_opcode = event.action as u16;
 
-            if event.res > 0 {
-                let progress = event.res as u64;
-                iocb.aio_buf = (buf.get_raw() as u64) + progress;
-                iocb.aio_nbytes = (buf.len() as u64) - progress;
-                iocb.aio_offset = event.offset + (progress as i64);
-            } else {
-                iocb.aio_buf = buf.get_raw() as u64;
-                iocb.aio_nbytes = buf.len() as u64;
+                if event.res > 0 {
+                    let progress = event.res as u64;
+                    iocb.aio_buf = (buf.get_raw() as u64) + progress;
+                    iocb.aio_nbytes = (buf.len() as u64) - progress;
+                    iocb.aio_offset = event.offset + (progress as i64);
+                } else {
+                    iocb.aio_buf = buf.get_raw() as u64;
+                    iocb.aio_nbytes = buf.len() as u64;
+                    iocb.aio_offset = event.offset;
+                }
+            }
+            BufOrLen::Len(0) => {
+                // This is for new_exit_signal
+                iocb.aio_lio_opcode = IOAction::Read as u16;
+                iocb.aio_buf = 0;
+                iocb.aio_nbytes = 0;
                 iocb.aio_offset = event.offset;
             }
-        } else {
-            // Zero-length read for exit signal
-            iocb.aio_lio_opcode = IOAction::Read as u16;
-            iocb.aio_buf = 0;
-            iocb.aio_nbytes = 0;
-            iocb.aio_offset = event.offset;
+            BufOrLen::Len(_) => {
+                // This is for Alloc/Fsync with actual length
+                // Not supported by AIO driver
+                panic!("Alloc/Fsync not supported by AIO driver");
+            }
         }
         self.event.replace(event);
     }

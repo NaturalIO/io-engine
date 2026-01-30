@@ -32,7 +32,7 @@
 //! - [`MergeBuffer`]: Internal buffer logic.
 //! - [`MergeSubmitter`]: Wraps a sender channel and manages the merge logic before sending.
 
-use crate::tasks::*;
+use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent, IOEvent_};
 use crossfire::BlockingTxTrait;
 use embed_collections::slist::SLinkedList;
 use io_buffer::Buffer;
@@ -182,10 +182,11 @@ impl<C: IOCallback> MergeBuffer<C> {
                 if action == IOAction::Write {
                     let mut _offset = 0;
                     for event_box in tasks.iter() {
-                        let b = event_box.buf.as_ref().unwrap().as_ref();
-                        let _size = b.len();
-                        buffer.copy_from(_offset, b);
-                        _offset += _size;
+                        if let BufOrLen::Buffer(b) = &event_box.buf_or_len {
+                            let _size = b.len();
+                            buffer.copy_from(_offset, b.as_ref());
+                            _offset += _size;
+                        }
                     }
                 }
                 let mut event = IOEvent::<C>::new(fd, buffer, action, offset);

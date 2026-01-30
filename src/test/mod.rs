@@ -1,6 +1,7 @@
 // Copyright (c) 2025 NaturalIO
 
 mod test_context;
+mod test_extra;
 mod test_merge;
 mod test_task;
 

@@ -1,8 +1,8 @@
 use crate::callback_worker::Worker;
 use crate::context::CtxShared;
-use crate::tasks::{IOAction, IOCallback, IOEvent, IOEvent_};
+use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent, IOEvent_};
 use crossfire::BlockingRxTrait;
-use io_uring::{IoUring, opcode, types};
+use io_uring::{IoUring, opcode, types::*};
 use log::{error, info};
 use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Duration};
 
@@ -95,30 +95,69 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                     for event in events {
                         let event = event;
                         let fd = event.fd;
-                        let buf_slice = event.get_buf_ref();
-
-                        let (offset, buf_ptr, buf_len) = if event.res > 0 {
-                            let progress = event.res as u64;
-                            (
-                                event.offset as u64 + progress,
-                                unsafe { (buf_slice.as_ptr() as *mut u8).add(progress as usize) },
-                                (buf_slice.len() as u64 - progress) as u32,
-                            )
-                        } else {
-                            (
-                                event.offset as u64,
-                                buf_slice.as_ptr() as *mut u8,
-                                buf_slice.len() as u32,
-                            )
-                        };
 
                         let sqe = match event.action {
-                            IOAction::Read => opcode::Read::new(types::Fd(fd), buf_ptr, buf_len)
-                                .offset(offset)
-                                .build(),
-                            IOAction::Write => opcode::Write::new(types::Fd(fd), buf_ptr, buf_len)
-                                .offset(offset)
-                                .build(),
+                            IOAction::Read => {
+                                if let BufOrLen::Buffer(buf) = &event.buf_or_len {
+                                    let (offset, buf_ptr, buf_len) = if event.res > 0 {
+                                        let progress = event.res as u64;
+                                        (
+                                            event.offset as u64 + progress,
+                                            unsafe {
+                                                (buf.as_ptr() as *mut u8).add(progress as usize)
+                                            },
+                                            (buf.len() as u64 - progress) as u32,
+                                        )
+                                    } else {
+                                        (
+                                            event.offset as u64,
+                                            buf.as_ptr() as *mut u8,
+                                            buf.len() as u32,
+                                        )
+                                    };
+                                    opcode::Read::new(Fd(fd), buf_ptr, buf_len)
+                                        .offset(offset)
+                                        .build()
+                                } else {
+                                    panic!("Read action without buffer");
+                                }
+                            }
+                            IOAction::Write => {
+                                if let BufOrLen::Buffer(buf) = &event.buf_or_len {
+                                    let (offset, buf_ptr, buf_len) = if event.res > 0 {
+                                        let progress = event.res as u64;
+                                        (
+                                            event.offset as u64 + progress,
+                                            unsafe {
+                                                (buf.as_ptr() as *mut u8).add(progress as usize)
+                                            },
+                                            (buf.len() as u64 - progress) as u32,
+                                        )
+                                    } else {
+                                        (
+                                            event.offset as u64,
+                                            buf.as_ptr() as *mut u8,
+                                            buf.len() as u32,
+                                        )
+                                    };
+                                    opcode::Write::new(Fd(fd), buf_ptr, buf_len)
+                                        .offset(offset)
+                                        .build()
+                                } else {
+                                    panic!("Write action without buffer");
+                                }
+                            }
+                            IOAction::Alloc => {
+                                if let BufOrLen::Len(len) = event.buf_or_len {
+                                    opcode::Fallocate::new(Fd(fd), len)
+                                        .offset(event.offset as u64)
+                                        .mode(0)
+                                        .build()
+                                } else {
+                                    panic!("Alloc action without length");
+                                }
+                            }
+                            IOAction::Fsync => opcode::Fsync::new(Fd(fd)).build(),
                         };
                         let user_data = Box::into_raw(event.0) as u64;
                         let sqe = sqe.user_data(user_data);
