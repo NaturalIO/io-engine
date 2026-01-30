@@ -1,4 +1,4 @@
-use crate::tasks::{ClosureCb, IOAction, IOEvent};
+use crate::tasks::{ClosureCb, IOAction, IOEvent, IOEvent_};
 use io_buffer::Buffer;
 use nix::errno::Errno;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ impl A {
 
 #[test]
 fn test_ioevent() {
+    println!("IOEvent size {}", std::mem::size_of::<IOEvent_<ClosureCb>>());
     let buffer = Buffer::aligned(4096).unwrap();
     let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
     assert!(!event.is_done());
