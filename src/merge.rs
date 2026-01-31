@@ -34,7 +34,7 @@
 
 use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent, IOEvent_};
 use crossfire::BlockingTxTrait;
-use embed_collections::slist::SLinkedList;
+use embed_collections::slist_owned::SLinkedListOwned;
 use io_buffer::Buffer;
 use libc;
 use std::io;
@@ -47,7 +47,7 @@ use std::os::fd::RawFd;
 /// the merge upper bound is specified in `merge_size_limit`.
 pub struct MergeBuffer<C: IOCallback> {
     pub merge_size_limit: usize,
-    merged_events: SLinkedList<Box<IOEvent_<C>>, ()>,
+    merged_events: SLinkedListOwned<IOEvent_<C>, ()>,
     merged_offset: i64,
     merged_data_size: usize,
 }
@@ -61,7 +61,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     pub fn new(merge_size_limit: usize) -> Self {
         Self {
             merge_size_limit,
-            merged_events: SLinkedList::new(),
+            merged_events: SLinkedListOwned::new(),
             merged_offset: -1,
             merged_data_size: 0,
         }
@@ -111,7 +111,7 @@ impl<C: IOCallback> MergeBuffer<C> {
             self.merged_offset = event.offset;
         }
         self.merged_data_size += event.get_size();
-        event.push_to_list(&mut self.merged_events);
+        self.merged_events.push_back(event.0);
 
         return self.merged_data_size >= self.merge_size_limit;
     }
@@ -128,13 +128,13 @@ impl<C: IOCallback> MergeBuffer<C> {
     ///
     /// # Returns
     /// A tuple containing:
-    /// - The `SLinkedList` of buffered events.
+    /// - The `SLinkedListOwned` of buffered events.
     /// - The starting offset of the merged events.
     /// - The total data size of the merged events.
     #[inline(always)]
-    fn take(&mut self) -> (SLinkedList<Box<IOEvent_<C>>, ()>, i64, usize) {
+    fn take(&mut self) -> (SLinkedListOwned<IOEvent_<C>, ()>, i64, usize) {
         // Move the list content out by swapping with empty new list
-        let tasks = std::mem::replace(&mut self.merged_events, SLinkedList::new());
+        let tasks = std::mem::replace(&mut self.merged_events, SLinkedListOwned::new());
         let merged_data_size = self.merged_data_size;
         let merged_offset = self.merged_offset;
         self.merged_offset = -1;
@@ -169,7 +169,7 @@ impl<C: IOCallback> MergeBuffer<C> {
         if batch_len == 1 {
             self.merged_offset = -1;
             self.merged_data_size = 0;
-            let mut event = IOEvent::pop_from_list(&mut self.merged_events).unwrap();
+            let mut event = IOEvent(self.merged_events.pop_front().unwrap());
             // NOTE: always reset fd, allow false fd while adding
             event.set_fd(fd);
             return Some(event);
@@ -181,8 +181,8 @@ impl<C: IOCallback> MergeBuffer<C> {
             Ok(mut buffer) => {
                 if action == IOAction::Write {
                     let mut _offset = 0;
-                    for event_box in tasks.iter() {
-                        if let BufOrLen::Buffer(b) = &event_box.buf_or_len {
+                    for event_ref in tasks.iter_mut() {
+                        if let BufOrLen::Buffer(b) = &event_ref.buf_or_len {
                             let _size = b.len();
                             buffer.copy_from(_offset, b.as_ref());
                             _offset += _size;
@@ -195,7 +195,8 @@ impl<C: IOCallback> MergeBuffer<C> {
             }
             Err(e) => {
                 warn!("mio: alloc buffer size {} failed: {}", size, e);
-                while let Some(mut event) = IOEvent::<C>::pop_from_list(&mut tasks) {
+                while let Some(event_box) = tasks.pop_front() {
+                    let mut event = IOEvent::<C>(event_box);
                     event.set_error(libc::ENOMEM);
                     event.callback();
                 }
