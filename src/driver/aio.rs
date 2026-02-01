@@ -1,4 +1,5 @@
 use crate::callback_worker::Worker;
+use nix::unistd::fsync;
 
 use crate::context::CtxShared;
 use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent};
@@ -6,6 +7,7 @@ use crossfire::{BlockingRxTrait, Rx, Tx, spsc};
 use nix::errno::Errno;
 use std::collections::VecDeque;
 use std::fs::File;
+use std::os::unix::io::BorrowedFd;
 use std::{
     cell::UnsafeCell,
     io,
@@ -35,7 +37,6 @@ impl<C: IOCallback> AioSlot<C> {
         match &event.buf_or_len {
             BufOrLen::Buffer(buf) => {
                 iocb.aio_lio_opcode = event.action as u16;
-
                 if event.res > 0 {
                     let progress = event.res as u64;
                     iocb.aio_buf = (buf.get_raw() as u64) + progress;
@@ -56,8 +57,7 @@ impl<C: IOCallback> AioSlot<C> {
             }
             BufOrLen::Len(_) => {
                 // This is for Alloc/Fsync with actual length
-                // Not supported by AIO driver
-                panic!("Alloc/Fsync not supported by AIO driver");
+                // These are now handled by the background worker, so this path should not be taken.
             }
         }
         self.event.replace(event);
@@ -130,6 +130,45 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
         Ok(())
     }
 
+    fn background_worker(ctx: Arc<CtxShared<C, Q, W>>, rx: Rx<spsc::Array<IOEvent<C>>>) {
+        loop {
+            match rx.recv() {
+                Ok(mut event) => {
+                    let res = match event.action {
+                        IOAction::Alloc => {
+                            if let BufOrLen::Len(len) = event.buf_or_len {
+                                let ret = unsafe {
+                                    libc::fallocate(event.fd, 0, event.offset, len as libc::off_t)
+                                };
+                                if ret == -1 { -Errno::last_raw() } else { 0 }
+                            } else {
+                                -libc::EINVAL
+                            }
+                        }
+                        IOAction::Fsync => fsync(unsafe { BorrowedFd::borrow_raw(event.fd) })
+                            .map_or_else(|e| -(e as i32), |_| 0),
+                        _ => -libc::EINVAL, // Should not happen
+                    };
+
+                    if res == 0 {
+                        if let BufOrLen::Len(len) = event.buf_or_len {
+                            event.set_copied(len as usize);
+                        } else {
+                            event.set_copied(0);
+                        }
+                    } else {
+                        event.set_error(-res);
+                    }
+                    ctx.cb_workers.done(event);
+                }
+                Err(_) => {
+                    // Channel closed, exit worker
+                    break;
+                }
+            }
+        }
+    }
+
     fn submit_loop(
         ctx: Arc<CtxShared<C, Q, W>>, inner: Arc<AioInner<C>>, free_recv: Rx<spsc::Array<u16>>,
     ) {
@@ -138,13 +177,31 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
         let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
         let aio_context = inner.context;
         let mut events_to_process = VecDeque::with_capacity(depth);
+        let mut background_channel_tx: Option<Tx<spsc::Array<IOEvent<C>>>> = None;
 
         loop {
             // 1. Fetch events
             // Only block if we have no events pending.
             if events_to_process.is_empty() {
                 match ctx.queue.recv() {
-                    Ok(event) => events_to_process.push_back(event),
+                    Ok(event) => match event.action {
+                        IOAction::Alloc | IOAction::Fsync => {
+                            if background_channel_tx.is_none() {
+                                let (tx, rx) = spsc::bounded_blocking::<IOEvent<C>>(depth);
+                                let ctx_clone = ctx.clone();
+                                thread::spawn(move || Self::background_worker(ctx_clone, rx));
+                                background_channel_tx = Some(tx);
+                            }
+                            if let Some(tx) = &background_channel_tx {
+                                if let Err(e) = tx.send(event) {
+                                    let mut event_to_err = e.into_inner();
+                                    event_to_err.set_error(Errno::EIO as i32);
+                                    ctx.cb_workers.done(event_to_err);
+                                }
+                            }
+                        }
+                        _ => events_to_process.push_back(event),
+                    },
                     Err(_) => {
                         // Queue closed. Time to exit.
                         // We need a free slot to submit the exit signal.
@@ -170,7 +227,18 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
             // Try to fetch more events up to depth
             while events_to_process.len() < depth {
                 if let Ok(event) = ctx.queue.try_recv() {
-                    events_to_process.push_back(event);
+                    match event.action {
+                        IOAction::Alloc | IOAction::Fsync => {
+                            if let Some(tx) = &background_channel_tx {
+                                if let Err(e) = tx.send(event) {
+                                    let mut event_to_err = e.into_inner();
+                                    event_to_err.set_error(Errno::EIO as i32);
+                                    ctx.cb_workers.done(event_to_err);
+                                }
+                            }
+                        }
+                        _ => events_to_process.push_back(event),
+                    }
                 } else {
                     break;
                 }
