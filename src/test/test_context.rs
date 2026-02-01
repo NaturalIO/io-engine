@@ -77,6 +77,98 @@ fn test_read_write_aio() {
 }
 
 #[test]
+fn test_fallocate_fsync_aio() {
+    setup_log();
+    let temp_file = make_temp_file();
+    let owned_fd = create_temp_file(temp_file.as_ref());
+    let fd = owned_fd.as_raw_fd();
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
+    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
+
+    let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
+    let callback = Box::new(move |event: IOEvent<ClosureCb>| {
+        let _ = done_tx.send(event);
+    });
+
+    // Test fallocate
+    let fallocate_len = 8192;
+    let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, fallocate_len);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit fallocate");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_result().is_ok());
+
+    // Verify file size after fallocate
+    let metadata = std::fs::metadata(temp_file.as_ref()).unwrap();
+    assert_eq!(metadata.len(), fallocate_len);
+
+    // Verify fallocate by writing to the allocated space
+    let mut buffer = Buffer::aligned(4096).unwrap();
+    rand_buffer(&mut buffer);
+    let mut event = IOEvent::new(fd, buffer.clone(), IOAction::Write, 4096);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit write");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_write_result().is_ok());
+
+    // Test fsync
+    let mut event = IOEvent::new_no_buf(fd, IOAction::Fsync, 0, 0);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit fsync");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_result().is_ok());
+}
+
+#[test]
+fn test_fallocate_fsync_uring() {
+    setup_log();
+    let temp_file = make_temp_file();
+    let owned_fd = create_temp_file(temp_file.as_ref());
+    let fd = owned_fd.as_raw_fd();
+    let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
+    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
+
+    let (done_tx, done_rx) = unbounded::<IOEvent<ClosureCb>>();
+    let callback = Box::new(move |event: IOEvent<ClosureCb>| {
+        let _ = done_tx.send(event);
+    });
+
+    // Test fallocate
+    let fallocate_len = 8192;
+    let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, fallocate_len);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit fallocate");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_result().is_ok());
+
+    // Verify file size after fallocate
+    let metadata = std::fs::metadata(temp_file.as_ref()).unwrap();
+    assert_eq!(metadata.len(), fallocate_len);
+
+    // Verify fallocate by writing to the allocated space
+    let mut buffer = Buffer::aligned(4096).unwrap();
+    rand_buffer(&mut buffer);
+    let mut event = IOEvent::new(fd, buffer.clone(), IOAction::Write, 4096);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit write");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_write_result().is_ok());
+
+    // Test fsync
+    let mut event = IOEvent::new_no_buf(fd, IOAction::Fsync, 0, 0);
+    event.set_callback(ClosureCb(callback.clone()));
+    tx.send(event).expect("submit fsync");
+    let event = done_rx.recv().unwrap();
+    assert!(event.is_done());
+    assert!(event.get_result().is_ok());
+}
+
+#[test]
 fn test_read_write_uring() {
     setup_log();
     let temp_file = make_temp_file();
