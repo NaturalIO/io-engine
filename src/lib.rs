@@ -8,7 +8,7 @@
 //! Key components:
 //! - [IOContext`]: The main driver entry point. Manages submission and completion of IO events.
 //! - [IOEvent](crate::tasks::IOEvent): Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
-//! - [IOCallback`]: Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
+//! - [IOCallback](crate::tasks::IOCallback): Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
 //! - [Worker](crate::callback_worker::Worker): Trait for workers handling completions.
 //! - [IOWorkers](crate::callback_worker::IOWorkers): Worker threads handling completions (implements `Worker`).
 //! - **IO Merging**: The engine supports merging sequential IO requests to reduce system call overhead. See the [`merge`] module for details.
@@ -72,7 +72,7 @@
 //!
 //! ### Example: Handling Short Reads
 //!
-//! ```rust,no_run
+//! ```rust
 //! use io_engine::tasks::{IOEvent, IOAction, ClosureCb};
 //! use io_buffer::Buffer;
 //! use crossfire::oneshot;

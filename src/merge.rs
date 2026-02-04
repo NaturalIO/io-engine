@@ -101,7 +101,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     ///
     /// # Safety
     ///
-    /// You should always check whether event is contiguous with [may_add_event] before calling `push_event()`
+    /// You should always check whether event is contiguous with [Self::may_add_event] before calling `push_event()`
     ///
     /// # Returns
     /// `true` if the buffer size has reached or exceeded `merge_size_limit` after adding the event, `false` otherwise.

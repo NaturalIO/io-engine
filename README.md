@@ -3,6 +3,8 @@
 A Rust library for block-based IO, intended to mask Linux AIO and io_uring underneath.
 This project aims to provide a unified, high-performance asynchronous I/O interface for Linux systems.
 
+Document: <https://docs.rs/io-engine>
+
 ## Build Requirements
 
 To build `io-engine`, you will need:
