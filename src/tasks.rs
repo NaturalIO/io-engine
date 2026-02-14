@@ -27,7 +27,7 @@ pub trait IOCallback: Sized + 'static + Send + Unpin {
 }
 
 /// Closure callback for IOEvent
-pub struct ClosureCb(pub Box<dyn FnOnce(IOEvent<Self>) + Send + Sync + 'static>);
+pub struct ClosureCb(pub Box<dyn FnOnce(IOEvent<Self>) + Send + 'static>);
 
 impl IOCallback for ClosureCb {
     fn call(self, event: IOEvent<Self>) {
