@@ -5,8 +5,8 @@ mod test_extra;
 mod test_merge;
 mod test_task;
 
+use fastrand;
 use libc;
-use rand::prelude::*;
 use std::fs::OpenOptions;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -36,9 +36,8 @@ impl AsRef<path::Path> for TempDevFile {
 
 // Create a temporary file name within the temporary directory configured in the environment.
 pub fn make_temp_file() -> TempDevFile {
-    let mut rng = rand::rng();
     let mut result = std::env::temp_dir();
-    let filename = format!("test-aio-{}.dat", rng.random::<u64>());
+    let filename = format!("test-aio-{}.dat", fastrand::u64(..));
     debug!("make_temp_file {}", filename);
     result.push(filename);
     TempDevFile(result.to_str().unwrap().to_string())

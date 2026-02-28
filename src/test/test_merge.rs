@@ -68,7 +68,7 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
         MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Write);
 
     let mut buf_all = Vec::<u8>::with_capacity(batch_num * io_size);
-    buf_all.resize_with(batch_num * io_size, || rand::random::<u8>());
+    buf_all.resize_with(batch_num * io_size, || fastrand::u8(..));
     let md51 = md5::compute(&buf_all);
     println!("buf all md5 {:?}", md51);
 

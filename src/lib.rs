@@ -206,8 +206,6 @@
 //! ```
 
 #[macro_use]
-extern crate log;
-#[macro_use]
 extern crate captains_log;
 
 pub mod callback_worker;
@@ -217,7 +215,5 @@ mod driver;
 pub mod merge;
 pub mod tasks;
 
-#[cfg(test)]
-extern crate rand;
 #[cfg(test)]
 mod test;

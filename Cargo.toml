@@ -17,14 +17,15 @@ nix = { version = "0", features = ["fs"] }
 io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"
-io-buffer = { version="1", features = ["rand"]}
+io-buffer = { version="1"}
 crossfire = "3.1"
 io-uring = "0.7"
 embed-collections = { version="0", default-features=false, features = ["slist"] }
 
 [dev-dependencies]
-rand = "0.9"
+fastrand = "2.3"
 md5 = "0"
+io-buffer = { version="1", features = ["rand"]}
 
 [features]
 default = []
