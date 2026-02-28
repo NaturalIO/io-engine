@@ -14,20 +14,17 @@ Library for block-based IO, intend to mask AIO/io_uring underneath.
 [dependencies]
 libc = "0"
 nix = { version = "0", features = ["fs"] }
-parking_lot = "0.9"
 io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"
-io-buffer = "1"
+io-buffer = { version="1", features = ["rand"]}
 crossfire = "3.1"
 io-uring = "0.7"
 embed-collections = { version="0", default-features=false, features = ["slist"] }
 
 [dev-dependencies]
 rand = "0.9"
-getrandom = "0.1"
 md5 = "0"
-tokio = { version = "1", features = ["time", "sync", "rt-multi-thread"] }
 
 [features]
 default = []

@@ -67,136 +67,127 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
     let mut m_write =
         MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Write);
 
-    let rt =
-        tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(4).build().unwrap();
-
     let mut buf_all = Vec::<u8>::with_capacity(batch_num * io_size);
     buf_all.resize_with(batch_num * io_size, || rand::random::<u8>());
     let md51 = md5::compute(&buf_all);
     println!("buf all md5 {:?}", md51);
 
-    rt.block_on(async move {
-        let wg = WaitGroup::new((), 0);
+    let wg = WaitGroup::new((), 0);
 
-        macro_rules! mk_cb {
-            ($wg: expr) => {{
-                let _guard: WaitGroupGuard<()> = $wg.add_guard();
-                ClosureCb(Box::new(move |_event: IOEvent<ClosureCb>| {
-                    drop(_guard);
-                }))
-            }};
-        }
-
-        for i in (0..batch_num / 2).step_by(2) {
-            let mut buf = Buffer::aligned(io_size as i32).unwrap();
-            buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-            event.set_callback(mk_cb!(wg));
-            m_write.add_event(event).expect("add_event");
-        }
-        println!("-- write 1");
-
-        for i in batch_num / 2..batch_num {
-            let mut buf = Buffer::aligned(io_size as i32).unwrap();
-            buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-            event.set_callback(mk_cb!(wg));
-            m_write.add_event(event).expect("add_event");
-        }
-        println!("---write 2");
-
-        for i in (1..(batch_num / 2 + 1)).step_by(2) {
-            let mut buf = Buffer::aligned(io_size as i32).unwrap();
-            buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
-            let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-            event.set_callback(mk_cb!(wg));
-            m_write.add_event(event).expect("add_event");
-        }
-        m_write.flush().expect("flush");
-        wg.wait_async().await;
-        println!("wriiten");
-        // TODO assert f.size
-
-        let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-        let mut m_read = MergeSubmitter::<ClosureCb, _>::new(
-            fd,
-            sender.clone(),
-            merge_size_limit,
-            IOAction::Read,
-        );
-        println!("--- reading");
-
-        for i in (0..batch_num / 2).step_by(2) {
-            let buf = Buffer::aligned(io_size as i32).unwrap();
-            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-            let _read_buf = read_buf.clone();
-            let offset = i * io_size;
-            let _guard = wg.add_guard();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
-                let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_read_result() {
-                    Ok(buffer) => {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                    Err(e) => {
-                        panic!("read error: {}", e);
-                    }
-                }
+    macro_rules! mk_cb {
+        ($wg: expr) => {{
+            let _guard: WaitGroupGuard<()> = $wg.add_guard();
+            ClosureCb(Box::new(move |_event: IOEvent<ClosureCb>| {
                 drop(_guard);
-            })));
-            m_read.add_event(event).expect("add_event");
-        }
+            }))
+        }};
+    }
 
-        println!("--- read 1");
+    for i in (0..batch_num / 2).step_by(2) {
+        let mut buf = Buffer::aligned(io_size as i32).unwrap();
+        buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
+        let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
+        event.set_callback(mk_cb!(wg));
+        m_write.add_event(event).expect("add_event");
+    }
+    println!("-- write 1");
 
-        for i in batch_num / 2..batch_num {
-            let buf = Buffer::aligned(io_size as i32).unwrap();
-            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-            let _read_buf = read_buf.clone();
-            let offset = i * io_size;
-            let _guard = wg.add_guard();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
-                let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_read_result() {
-                    Ok(buffer) => {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                    Err(e) => {
-                        panic!("read error: {}", e);
-                    }
+    for i in batch_num / 2..batch_num {
+        let mut buf = Buffer::aligned(io_size as i32).unwrap();
+        buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
+        let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
+        event.set_callback(mk_cb!(wg));
+        m_write.add_event(event).expect("add_event");
+    }
+    println!("---write 2");
+
+    for i in (1..(batch_num / 2 + 1)).step_by(2) {
+        let mut buf = Buffer::aligned(io_size as i32).unwrap();
+        buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
+        let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
+        event.set_callback(mk_cb!(wg));
+        m_write.add_event(event).expect("add_event");
+    }
+    m_write.flush().expect("flush");
+    wg.wait();
+    println!("wriiten");
+    // TODO assert f.size
+
+    let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
+    let mut m_read =
+        MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Read);
+    println!("--- reading");
+
+    for i in (0..batch_num / 2).step_by(2) {
+        let buf = Buffer::aligned(io_size as i32).unwrap();
+        let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
+        let _read_buf = read_buf.clone();
+        let offset = i * io_size;
+        let _guard = wg.add_guard();
+        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+            let mut _buf_all = _read_buf.lock().unwrap();
+            match _event.get_read_result() {
+                Ok(buffer) => {
+                    _buf_all.copy_from(offset, buffer.as_ref());
                 }
-                drop(_guard);
-            })));
-            m_read.add_event(event).expect("add_event");
-        }
-
-        println!("--- read 2");
-        for i in (1..(batch_num / 2 + 1)).step_by(2) {
-            let buf = Buffer::aligned(io_size as i32).unwrap();
-            let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-            let _read_buf = read_buf.clone();
-            let offset = i * io_size;
-            let _guard = wg.add_guard();
-            event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
-                let mut _buf_all = _read_buf.lock().unwrap();
-                match _event.get_read_result() {
-                    Ok(buffer) => {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                    Err(e) => {
-                        panic!("read error: {}", e);
-                    }
+                Err(e) => {
+                    panic!("read error: {}", e);
                 }
-                drop(_guard);
-            })));
-            m_read.add_event(event).expect("add_event");
-        }
-        println!("--- read 3");
-        m_read.flush().expect("flush");
-        wg.wait_async().await;
+            }
+            drop(_guard);
+        })));
+        m_read.add_event(event).expect("add_event");
+    }
 
-        assert_eq!(md51, md5::compute(read_buf.lock().unwrap().as_ref()));
-    });
+    println!("--- read 1");
+
+    for i in batch_num / 2..batch_num {
+        let buf = Buffer::aligned(io_size as i32).unwrap();
+        let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
+        let _read_buf = read_buf.clone();
+        let offset = i * io_size;
+        let _guard = wg.add_guard();
+        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+            let mut _buf_all = _read_buf.lock().unwrap();
+            match _event.get_read_result() {
+                Ok(buffer) => {
+                    _buf_all.copy_from(offset, buffer.as_ref());
+                }
+                Err(e) => {
+                    panic!("read error: {}", e);
+                }
+            }
+            drop(_guard);
+        })));
+        m_read.add_event(event).expect("add_event");
+    }
+
+    println!("--- read 2");
+    for i in (1..(batch_num / 2 + 1)).step_by(2) {
+        let buf = Buffer::aligned(io_size as i32).unwrap();
+        let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
+        let _read_buf = read_buf.clone();
+        let offset = i * io_size;
+        let _guard = wg.add_guard();
+        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+            let mut _buf_all = _read_buf.lock().unwrap();
+            match _event.get_read_result() {
+                Ok(buffer) => {
+                    _buf_all.copy_from(offset, buffer.as_ref());
+                }
+                Err(e) => {
+                    panic!("read error: {}", e);
+                }
+            }
+            drop(_guard);
+        })));
+        m_read.add_event(event).expect("add_event");
+    }
+    println!("--- read 3");
+    m_read.flush().expect("flush");
+    wg.wait();
+
+    assert_eq!(md51, md5::compute(read_buf.lock().unwrap().as_ref()));
 }
 
 #[test]
