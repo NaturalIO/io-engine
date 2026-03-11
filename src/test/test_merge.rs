@@ -76,7 +76,7 @@ fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send
     macro_rules! mk_cb {
         ($wg: expr) => {{
             let _guard: WaitGroupGuard<()> = $wg.add_guard();
-            ClosureCb(Box::new(move |_offset, _buf, _res| {
+            ClosureCb(Box::new(move |_offset, _res| {
                 drop(_guard);
             }))
         }};
@@ -123,10 +123,10 @@ fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
             match res {
-                Ok(_len) => {
+                Ok(buf) => {
                     if let Some(buffer) = buf {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }
@@ -148,10 +148,10 @@ fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
             match res {
-                Ok(_len) => {
+                Ok(buf) => {
                     if let Some(buffer) = buf {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }
@@ -172,10 +172,10 @@ fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
             match res {
-                Ok(_len) => {
+                Ok(buf) => {
                     if let Some(buffer) = buf {
                         _buf_all.copy_from(offset, buffer.as_ref());
                     }

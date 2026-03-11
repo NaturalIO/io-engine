@@ -2,6 +2,7 @@ use crate::callback_worker::IOWorkers;
 use crate::context::{Driver, setup};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
+use nix::errno::Errno;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::sync::mpsc::channel as unbounded;
@@ -17,11 +18,11 @@ fn test_fallocate() {
     let (tx, rx) = crossfire::mpsc::bounded_blocking(1);
     setup::<ClosureCb, _, _>(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
-    let (done_tx, done_rx) = unbounded();
+    let (done_tx, done_rx) = unbounded::<Result<(), Errno>>();
 
-    let cb = ClosureCb(Box::new(move |_offset, _buf, res| {
+    let cb = ClosureCb(Box::new(move |_offset, res| {
         assert!(res.is_ok());
-        done_tx.send(()).unwrap();
+        done_tx.send(res.map(|_| ())).unwrap();
     }));
 
     let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, 4096);
@@ -45,11 +46,11 @@ fn test_fsync() {
     let (tx, rx) = crossfire::mpsc::bounded_blocking(1);
     setup::<ClosureCb, _, _>(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
-    let (done_tx, done_rx) = unbounded();
+    let (done_tx, done_rx) = unbounded::<Result<(), Errno>>();
 
-    let cb = ClosureCb(Box::new(move |_offset, _buf, res| {
+    let cb = ClosureCb(Box::new(move |_offset, res| {
         assert!(res.is_ok());
-        done_tx.send(()).unwrap();
+        done_tx.send(res.map(|_| ())).unwrap();
     }));
 
     let mut event = IOEvent::new_no_buf(fd, IOAction::Fsync, 0, 0);

@@ -142,7 +142,7 @@ impl<
                     } else {
                         event.set_error(-res);
                     }
-                    event.callback();
+                    event.callback_unchecked(true);
                 }
                 Err(_) => {
                     // Channel closed, exit worker
@@ -174,8 +174,8 @@ impl<
                             }
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
-                                    event.set_error(Errno::EIO as i32);
-                                    event.callback();
+                                    event.set_error(Errno::ESHUTDOWN as i32);
+                                    event.callback_unchecked(true);
                                 }
                             }
                         }
@@ -208,8 +208,8 @@ impl<
                         IOAction::Alloc | IOAction::Fsync => {
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
-                                    event.set_error(Errno::EIO as i32);
-                                    event.callback();
+                                    event.set_error(Errno::ESHUTDOWN as i32);
+                                    event.callback_unchecked(true);
                                 }
                             }
                         }

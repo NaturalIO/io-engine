@@ -26,7 +26,7 @@
 //!   - The original events are attached as `sub_tasks` (a linked list) to this master event.
 //!   - **Write**: The data from individual buffers is copied into a single large aligned buffer.
 //!   - **Read**: A large buffer is allocated for the master event. Upon completion, data is copied back to the individual event buffers.
-//!   - **Completion**: When the master event completes, `callback_merged` (in `tasks.rs`) is invoked. It iterates over sub-tasks, sets their results (copying data for reads), and triggers their individual callbacks.
+//!   - **Completion**: When the master event completes, it iterates over sub-tasks, sets their results (copying data for reads), and triggers their individual callbacks.
 //!
 //! ## Components
 //! - [`MergeBuffer`]: Internal buffer logic.
@@ -36,7 +36,7 @@ use crate::tasks::{IOAction, IOCallback, IOEvent, IOEventMerged};
 use crossfire::BlockingTxTrait;
 use embed_collections::SegList;
 use io_buffer::Buffer;
-use libc;
+use nix::errno::Errno;
 use std::io;
 use std::os::fd::RawFd;
 
@@ -190,7 +190,7 @@ impl<C: IOCallback> MergeBuffer<C> {
                 // Allocation failed: error out all events
                 for merged in sub_tasks.drain() {
                     if let Some(cb) = merged.cb {
-                        cb.call(offset, Some(merged.buf), Err(-libc::ENOMEM));
+                        cb.call(offset, Err(Errno::ENOMEM));
                     }
                 }
                 None
@@ -262,14 +262,15 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// # Returns
     /// An `Ok(())` on success, or an `io::Error` if flushing fails.
     /// On debug mode, will validate event.fd and event.action.
-    pub fn add_event(&mut self, event: IOEvent<C>) -> Result<(), io::Error> {
+    pub fn add_event(&mut self, mut event: IOEvent<C>) -> Result<(), io::Error> {
         log_debug_assert_eq!(self.fd, event.fd);
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
 
         if event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event) {
             if let Err(e) = self._flush() {
-                event.callback();
+                event.set_error(Errno::ESHUTDOWN as i32);
+                event.callback_unchecked(false);
                 return Err(e);
             }
         }

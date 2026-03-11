@@ -9,7 +9,11 @@ pub trait Worker<C: IOCallback>: Send + 'static {
     fn done(&self, event: Box<IOEvent<C>>);
 }
 
-/// Implement with crossfire::mpmc, can be shared among multiple driver instances.
+/// Example callback worker implement with crossfire::mpmc, can be shared among multiple driver instances.
+///
+/// # Safety
+///
+/// It does not check and resubmit short I/O
 pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
 
 impl<C: IOCallback> IOWorkers<C> {
@@ -20,7 +24,7 @@ impl<C: IOCallback> IOWorkers<C> {
             std::thread::spawn(move || {
                 loop {
                     match _rx.recv() {
-                        Ok(event) => event.callback(),
+                        Ok(event) => event.callback_unchecked(false),
                         Err(_) => {
                             debug!("IOWorkers exit");
                             return;
@@ -67,12 +71,16 @@ where
     }
 }
 
-/// Inline worker that executes callbacks directly without spawning threads.
+/// Example Inline worker that executes callbacks directly without spawning threads.
 /// Use this for very lightweight callback logic to avoid thread context switching overhead.
+///
+/// # Safety
+///
+/// It does not check and resubmit short I/O
 pub struct Inline;
 
 impl<C: IOCallback> Worker<C> for Inline {
     fn done(&self, event: Box<IOEvent<C>>) {
-        event.callback();
+        event.callback_unchecked(false);
     }
 }

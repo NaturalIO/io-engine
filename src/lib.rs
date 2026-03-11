@@ -29,15 +29,17 @@
 //!
 //! ```rust
 //! use io_engine::tasks::{IOCallback, IOEvent};
+//! use nix::errno::Errno;
 //!
 //! struct MyCallback {
 //!     id: u64,
 //! }
 //!
 //! impl IOCallback for MyCallback {
-//!     fn call(self, _offset: i64, buf: Option<io_buffer::Buffer>, res: Result<u32, i32>) {
+//!     fn call(self, _offset: i64, res: Result<Option<io_buffer::Buffer>, Errno>) {
 //!         match res {
-//!             Ok(len) => println!("Operation {} completed, result len: {}", self.id, len),
+//!             Ok(Some(buf)) => println!("Operation {} completed, buffer len: {}", self.id, buf.len()),
+//!             Ok(None) => println!("Operation {} completed (no buffer)", self.id),
 //!             Err(e) => println!("Operation {} failed, error: {}", self.id, e),
 //!         }
 //!     }
@@ -47,69 +49,52 @@
 //! ## Short Read/Write Handling
 //!
 //! The engine supports transparent handling of short reads and writes (partial IO).
-//! This is achieved through the `IOEvent` structure which tracks the progress of the operation.
+//! When a read or write operation completes, the callback worker automatically adjusts
+//! the buffer length to reflect the actual bytes transferred.
 //!
 //! ### How It Works
 //!
-//! - The `res` field in `IOEvent` (initialized to `i32::MIN`) stores the accumulated bytes transferred
-//!   when `res >= 0`.
-//! - When a driver (`aio` or `uring`) processes an event, it checks if `res >= 0`.
-//! - If true, it treats the event as a continuation (retry) and adjusts the buffer pointer,
-//!   length, and file offset based on the bytes already transferred.
-//! - This allows the upper layers or callback mechanisms to re-submit incomplete events
-//!   without manually slicing buffers or updating offsets.
+//! - When an IO operation completes, the `callback_unchecked` method adjusts `Buffer::len()`
+//!   to match the actual bytes transferred (`res`).
+//! - For read operations, this means the buffer contains exactly the data that was read.
+//! - For write operations, the buffer length is also adjusted to reflect completion status.
 //!
-//! ### Handling Short IO in Your Code
+//! ### Callback Worker Implementation
 //!
-//! When you receive a completed `IOEvent`, you should:
+//! When implementing a custom callback worker, you should use `callback_unchecked` which detect
+//! short I/O and change reading Buffer length to exact copied bytes.
 //!
-//! 1. Call `get_result()` to check how many bytes were actually transferred
-//! 2. Compare with the expected length to detect short IO
-//! 3. If incomplete, create a new oneshot channel, set a new callback, and resubmit the **same** `IOEvent`
-//! 4. The driver will automatically continue from where it left off
-//!
-//! **Important:** Do NOT recreate the `IOEvent` for retries. Reuse the original event.
-//!
-//! ### Example: Handling Short Reads
-//!
-//! ```rust
-//! use io_engine::tasks::{IOEvent, IOAction, ClosureCb};
-//! use io_buffer::Buffer;
-//! use crossfire::oneshot;
-//! use crossfire::mpsc;
-//! use std::os::fd::RawFd;
-//!
-//! async fn read_full(
-//!     fd: RawFd,
-//!     offset: u64,
-//!     buf: Buffer,
-//!     queue_tx: &crossfire::MTx<mpsc::Array<IOEvent<ClosureCb>>>,
-//! ) -> Result<Buffer, String> {
-//!     let total_len = buf.len();
-//!     let (tx, rx) = oneshot::oneshot();
-//!
-//!     // Submit read
-//!     let mut event = IOEvent::new(fd, buf, IOAction::Read, offset as i64);
-//!     event.set_callback(ClosureCb(Box::new(move |_offset, read_buf, res| {
-//!         let _ = tx.send((read_buf, res));
-//!     })));
-//!     queue_tx.send(event).expect("submit");
-//!
-//!     // Wait for completion
-//!     let (read_buf, res) = rx.await.map_err(|_| "Channel error")?;
-//!     let n = res.map_err(|_| "IO error")? as usize;
-//!
-//!     if n >= total_len {
-//!         // Complete
-//!         let mut buf = read_buf.ok_or("Buffer is None")?;
-//!         buf.set_len(n);
-//!         Ok(buf)
-//!     } else {
-//!         // Short read - in production, retry with remaining buffer
-//!         Err("Short read".to_string())
+//! ```rust,ignore
+//! // In your callback worker thread
+//! loop {
+//!     match rx.recv() {
+//!         Ok(event) => event.callback_unchecked(true),
+//!         Err(_) => break,
 //!     }
 //! }
 //! ```
+//!
+//! ### Advanced: Detecting Short I/O with File Boundary Check
+//!
+//! The `callback` method accepts a closure that allows you to detect if short I/O
+//! is due to reaching the file end (which is normal) or an actual error condition
+//! that requires retry:
+//!
+//! ```rust,ignore
+//! // check_short_read returns true if offset exceeds file end
+//! event.callback(|offset| {
+//!         // NOTE: you should probably use weak reference here
+//!         offset < file_size
+//!     })
+//!     .unwrap_or_else(|event| {
+//!         // Short I/O detected, resubmit the event
+//!         queue_tx.send(event).unwrap();
+//!     });
+//! ```
+//!
+//! The closure receives the current offset and should return `true` if the offset
+//! exceeds the file boundary (indicating EOF). If the closure returns `true`,
+//! the short I/O is considered an error condition that may need retry.
 //!
 //! ## Usage Example (io_uring)
 //!
@@ -153,7 +138,7 @@
 //!
 //!     // Create oneshot for this event's completion
 //!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |_offset, _buf, res| {
+//!     event.set_callback(ClosureCb(Box::new(move |_offset, res| {
 //!         let _ = done_tx.send(res);
 //!     })));
 //!
@@ -169,15 +154,16 @@
 //!     let mut event = IOEvent::new(fd, buffer, IOAction::Read, 0);
 //!
 //!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
-//!         let _ = done_tx.send((buf, res));
+//!     event.set_callback(ClosureCb(Box::new(move |_offset, res| {
+//!         let _ = done_tx.send(res);
 //!     })));
 //!
 //!     tx.send(Box::new(event)).expect("submit");
 //!
-//!     let (read_buf, res) = done_rx.recv().unwrap();
-//!     let _ = res.expect("Read failed");
-//!     let read_buf = read_buf.expect("Read buffer is None");
+//!     let res = done_rx.recv().unwrap();
+//!     let read_buf = res.expect("Read failed");
+//!     assert!(read_buf.is_some());
+//!     let read_buf = read_buf.unwrap();
 //!     assert_eq!(read_buf.len(), 4096);
 //!     assert_eq!(read_buf[0], 65);
 //! }
