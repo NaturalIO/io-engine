@@ -1,9 +1,21 @@
 # io-engine
 
-A Rust library for block-based IO, intended to mask Linux AIO and io_uring underneath.
+A Rust library for file-based IO, intended to mask Linux AIO and io_uring underneath.
 This project aims to provide a unified, high-performance asynchronous I/O interface for Linux systems.
 
-Document: <https://docs.rs/io-engine>
+## Features
+
+- Short i/o consideration
+
+- I/O submission and callback is done with [crossfire](docs.rs/crossfire) channel.
+
+- No dependency on async runtime.
+
+- Fsync (AIO is implemented by background thread)
+
+- Fallocate (AIO is implemented by background thread)
+
+For usage, please read document: <https://docs.rs/io-engine>
 
 ## Build Requirements
 
