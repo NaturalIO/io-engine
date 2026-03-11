@@ -1,19 +1,12 @@
-use std::cell::UnsafeCell;
-use std::fmt;
-use std::ops::{Deref, DerefMut};
 use std::os::fd::RawFd;
+use std::{fmt, u64};
 
+use embed_collections::SegList;
+use io_buffer::{Buffer, safe_copy};
 use nix::errno::Errno;
 
-use embed_collections::slist::{SLinkedList, SListItem, SListNode};
-use io_buffer::{Buffer, safe_copy};
-
-pub enum BufOrLen {
-    Buffer(Buffer),
-    Len(u64),
-}
-
 #[derive(Copy, Clone, PartialEq, Debug)]
+#[repr(u8)]
 pub enum IOAction {
     Read = 0,
     Write = 1,
@@ -23,99 +16,85 @@ pub enum IOAction {
 
 /// Define your callback with this trait
 pub trait IOCallback: Sized + 'static + Send + Unpin {
-    fn call(self, _event: IOEvent<Self>);
+    fn call(self, offset: i64, buf: Option<Buffer>, res: Result<u32, i32>);
 }
 
 /// Closure callback for IOEvent
-pub struct ClosureCb(pub Box<dyn FnOnce(IOEvent<Self>) + Send + 'static>);
+pub struct ClosureCb(pub Box<dyn FnOnce(i64, Option<Buffer>, Result<u32, i32>) + Send>);
 
 impl IOCallback for ClosureCb {
-    fn call(self, event: IOEvent<Self>) {
-        (self.0)(event)
-    }
-}
-
-pub struct IOEvent<C: IOCallback>(pub Box<IOEvent_<C>>);
-
-impl<C: IOCallback> Deref for IOEvent<C> {
-    type Target = IOEvent_<C>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<C: IOCallback> DerefMut for IOEvent<C> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl<C: IOCallback> fmt::Debug for IOEvent<C> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)
+    fn call(self, offset: i64, buf: Option<Buffer>, res: Result<u32, i32>) {
+        (self.0)(offset, buf, res)
     }
 }
 
 // Carries the information of read/write event
-#[repr(C)]
-pub struct IOEvent_<C: IOCallback> {
-    /// make sure SListNode always in the front.
-    /// This is for putting sub_tasks in the link list, without additional allocation.
-    pub(crate) node: UnsafeCell<SListNode<Self, ()>>,
-    pub buf_or_len: BufOrLen,
-    pub offset: i64,
+pub struct IOEvent<C: IOCallback> {
     pub action: IOAction,
-    pub fd: RawFd,
     /// Result of the IO operation.
     /// Initialized to i32::MIN.
     /// >= 0: Accumulated bytes transferred (used for partial IO retries).
     /// < 0: Error code (negative errno).
     pub(crate) res: i32,
-    cb: Option<C>,
-    sub_tasks: SLinkedList<Box<Self>, ()>,
+    /// make sure SListNode always in the front.
+    /// This is for putting sub_tasks in the link list, without additional allocation.
+    buf_or_len: BufOrLen,
+    pub offset: i64,
+    pub fd: RawFd,
+    cb: TaskCallback<C>,
 }
 
-// Implement SListItem for IOEvent_ to allow it to be linked
-unsafe impl<C: IOCallback> SListItem<()> for IOEvent_<C> {
-    fn get_node(&self) -> &mut SListNode<Self, ()> {
-        unsafe { &mut *self.node.get() }
-    }
+enum TaskCallback<C: IOCallback> {
+    None,
+    Callback(C),
+    Merged(SegList<IOEventMerged<C>>),
 }
 
-impl<C: IOCallback> fmt::Debug for IOEvent_<C> {
+enum BufOrLen {
+    Buffer(Buffer),
+    /// for fallocate
+    Len(u64),
+}
+
+pub(crate) struct IOEventMerged<C: IOCallback> {
+    pub buf: Buffer,
+    pub cb: Option<C>,
+}
+
+impl<C: IOCallback> fmt::Debug for IOEvent<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "offset={} {:?} sub_tasks {}", self.offset, self.action, self.sub_tasks.len())
+        if let TaskCallback::Merged(sub_tasks) = &self.cb {
+            write!(f, "offset={} {:?} merged {}", self.offset, self.action, sub_tasks.len())
+        } else {
+            write!(f, "offset={} {:?}", self.offset, self.action)
+        }
     }
 }
 
 impl<C: IOCallback> IOEvent<C> {
     #[inline]
-    pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> IOEvent<C> {
+    pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Self {
         log_assert!(buf.len() > 0, "{:?} offset={}, buffer size == 0", action, offset);
-        IOEvent(Box::new(IOEvent_ {
+        Self {
             buf_or_len: BufOrLen::Buffer(buf),
             fd,
             action,
             offset,
             res: i32::MIN,
-            cb: None,
-            sub_tasks: SLinkedList::new(),
-            node: UnsafeCell::new(SListNode::default()),
-        }))
+            cb: TaskCallback::None,
+        }
     }
 
     #[inline]
-    pub fn new_no_buf(fd: RawFd, action: IOAction, offset: i64, len: u64) -> IOEvent<C> {
-        IOEvent(Box::new(IOEvent_ {
+    pub fn new_no_buf(fd: RawFd, action: IOAction, offset: i64, len: u64) -> Self {
+        Self {
             buf_or_len: BufOrLen::Len(len), // No buffer for this action
             fd,
             action,
             offset,
             res: i32::MIN,
-            cb: None,
-            sub_tasks: SLinkedList::new(),
-            node: UnsafeCell::new(SListNode::default()),
-        }))
+            cb: TaskCallback::None,
+        }
     }
 
     #[inline(always)]
@@ -126,35 +105,72 @@ impl<C: IOCallback> IOEvent<C> {
     /// Set callback for IOEvent, might be closure or a custom struct
     #[inline(always)]
     pub fn set_callback(&mut self, cb: C) {
-        self.cb = Some(cb);
+        self.cb = TaskCallback::Callback(cb);
     }
 
     #[inline(always)]
-    pub fn get_size(&self) -> usize {
-        if let BufOrLen::Buffer(buf) = &self.buf_or_len { buf.len() } else { 0 }
+    pub fn get_size(&self) -> u64 {
+        match &self.buf_or_len {
+            BufOrLen::Buffer(buf) => buf.len() as u64,
+            BufOrLen::Len(l) => *l,
+        }
     }
 
+    /// Set merged buffer and subtasks for the master event after merging.
     #[inline(always)]
-    pub(crate) fn push_to_list(self, events: &mut SLinkedList<Box<IOEvent_<C>>, ()>) {
-        events.push_back(self.0);
+    pub(crate) fn set_merged_tasks(
+        &mut self, merged_buf: Buffer, sub_tasks: SegList<IOEventMerged<C>>,
+    ) {
+        self.buf_or_len = BufOrLen::Buffer(merged_buf);
+        self.cb = TaskCallback::Merged(sub_tasks);
     }
 
+    /// Convert this IOEvent into an IOEventMerged for storing in merge buffer.
+    /// Extracts the buffer and callback from the event.
     #[inline(always)]
-    pub(crate) fn pop_from_list(events: &mut SLinkedList<Box<IOEvent_<C>>, ()>) -> Option<Self> {
-        events.pop_front().map(IOEvent)
+    pub(crate) fn into_merged(mut self) -> IOEventMerged<C> {
+        let buf = match std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0)) {
+            BufOrLen::Buffer(buf) => buf,
+            BufOrLen::Len(_) => panic!("into_merged called on IOEvent with no buffer"),
+        };
+        let cb = match std::mem::replace(&mut self.cb, TaskCallback::None) {
+            TaskCallback::Callback(cb) => Some(cb),
+            _ => None,
+        };
+        IOEventMerged { buf, cb }
     }
 
+    /// Extract buffer and callback to create IOEventMerged, leaving this event with empty buffer.
+    /// Used when moving first event to merged_events list.
     #[inline(always)]
-    pub(crate) fn set_subtasks(&mut self, sub_tasks: SLinkedList<Box<IOEvent_<C>>, ()>) {
-        self.sub_tasks = sub_tasks;
+    pub(crate) fn extract_merged(&mut self) -> IOEventMerged<C> {
+        let buf = match std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0)) {
+            BufOrLen::Buffer(buf) => buf,
+            BufOrLen::Len(_) => panic!("extract_merged called on IOEvent with no buffer"),
+        };
+        let cb = match std::mem::replace(&mut self.cb, TaskCallback::None) {
+            TaskCallback::Callback(cb) => Some(cb),
+            _ => None,
+        };
+        IOEventMerged { buf, cb }
     }
 
+    /// return (offset, ptr, len)
     #[inline(always)]
-    pub fn get_buf_ref<'a>(&'a self) -> &'a [u8] {
-        if let BufOrLen::Buffer(buf) = &self.buf_or_len {
-            buf.as_ref()
+    pub(crate) fn get_param_for_io(&mut self) -> (u64, *mut u8, u32) {
+        if let BufOrLen::Buffer(buf) = &mut self.buf_or_len {
+            let mut offset = self.offset as u64;
+            let mut p = buf.get_raw_mut();
+            let mut l = buf.len() as u32;
+            if self.res > 0 {
+                // resubmited I/O
+                offset += self.res as u64;
+                p = unsafe { p.add(self.res as usize) };
+                l += self.res as u32;
+            }
+            (offset, p, l)
         } else {
-            panic!("get_buf_ref called on IOEvent with no buffer");
+            panic!("get_buf_raw called on IOEvent with no buffer");
         }
     }
 
@@ -195,6 +211,7 @@ impl<C: IOCallback> IOEvent<C> {
     pub fn get_read_result(mut self) -> Result<Buffer, Errno> {
         let res = self.res;
         if res >= 0 {
+            // XXX?
             let buf_or_len = std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0));
             if let BufOrLen::Buffer(buf) = buf_or_len {
                 // Do NOT modify buffer length - caller should use get_result() to know actual bytes read
@@ -225,21 +242,11 @@ impl<C: IOCallback> IOEvent<C> {
     #[inline(always)]
     pub(crate) fn set_copied(&mut self, len: usize) {
         if self.res == i32::MIN {
+            // the initial state
             self.res = len as i32;
         } else {
+            // resubmit for short I/O
             self.res += len as i32;
-        }
-    }
-
-    /// Trigger the callback for this IOEvent.
-    /// This consumes the event and calls the associated callback.
-    #[inline(always)]
-    pub(crate) fn callback(mut self) {
-        match self.cb.take() {
-            Some(cb) => {
-                cb.call(self);
-            }
-            None => return,
         }
     }
 
@@ -247,67 +254,95 @@ impl<C: IOCallback> IOEvent<C> {
     ///
     /// Callback worker should always call this function on receiving IOEvent from Driver
     #[inline(always)]
-    pub fn callback_merged(mut self) {
-        if !self.sub_tasks.is_empty() {
-            let res = self.res;
-            if res >= 0 {
-                if self.action == IOAction::Read {
-                    let buf_or_len = std::mem::replace(&mut self.buf_or_len, BufOrLen::Len(0));
-                    if let BufOrLen::Buffer(buffer) = buf_or_len {
-                        let mut b = buffer.as_ref();
-                        for event_box in self.sub_tasks.drain() {
-                            let mut event = IOEvent(event_box);
-                            if let BufOrLen::Buffer(sub_buf) = &mut event.buf_or_len {
-                                if b.len() == 0 {
-                                    // short read
-                                    event.set_copied(0);
-                                } else {
-                                    let copied = safe_copy(sub_buf, b);
-                                    event.set_copied(copied);
+    pub fn callback(mut self) {
+        match std::mem::replace(&mut self.cb, TaskCallback::None) {
+            TaskCallback::None => {}
+            TaskCallback::Callback(cb) => {
+                let res: Result<u32, i32> =
+                    if self.res >= 0 { Ok(self.res as u32) } else { Err(-self.res) };
+                let buf = match self.buf_or_len {
+                    BufOrLen::Buffer(buf) => Some(buf),
+                    BufOrLen::Len(_) => None,
+                };
+                cb.call(self.offset, buf, res);
+            }
+            TaskCallback::Merged(sub_tasks) => {
+                if self.res >= 0 {
+                    let mut offset = self.offset;
+                    if self.action == IOAction::Read {
+                        if let BufOrLen::Buffer(parent_buf) = &self.buf_or_len {
+                            let mut b: &[u8] = &parent_buf[0..self.res as usize];
+                            for IOEventMerged { mut buf, cb } in sub_tasks {
+                                if let Some(_cb) = cb {
+                                    let copied = safe_copy(&mut buf, b);
+                                    _cb.call(offset, Some(buf), Ok(copied as u32));
                                     b = &b[copied..];
+                                    offset += copied as i64
                                 }
                             }
-                            event.callback();
+                        }
+                    } else if self.action == IOAction::Write {
+                        let mut l = self.res as usize;
+                        for IOEventMerged { buf, cb } in sub_tasks {
+                            let mut copied = buf.len();
+                            if copied > l {
+                                // short write
+                                copied = l;
+                            }
+                            if let Some(_cb) = cb {
+                                _cb.call(offset, None, Ok(copied as u32))
+                            }
+                            l -= copied;
+                            offset += copied as i64;
                         }
                     }
                 } else {
-                    let l = self.get_size();
-                    for event_box in self.sub_tasks.drain() {
-                        let mut event = IOEvent(event_box);
-                        let mut sub_len = event.get_size();
-                        if sub_len > l {
-                            // short write
-                            sub_len = l;
+                    let mut offset = self.offset;
+                    for IOEventMerged { buf, cb } in sub_tasks {
+                        let _l = buf.len() as i64;
+                        if let Some(_cb) = cb {
+                            _cb.call(offset, Some(buf), Err(-self.res));
                         }
-                        event.set_copied(sub_len);
-                        event.callback();
+                        offset += _l;
                     }
                 }
-            } else {
-                let errno = -res;
-                for event_box in self.sub_tasks.drain() {
-                    let mut event = IOEvent(event_box);
-                    event.set_error(errno);
-                    event.callback();
-                }
             }
-        } else {
-            self.callback();
         }
     }
+}
 
-    // New constructor for exit signal events
-    pub(crate) fn new_exit_signal(fd: RawFd) -> Self {
-        // Exit signal wraps a IOEvent
-        Self(Box::new(IOEvent_ {
-            node: UnsafeCell::new(SListNode::default()),
-            buf_or_len: BufOrLen::Len(0),
-            offset: 0,
-            action: IOAction::Read, // Exit signal is a read
-            fd,
-            res: i32::MIN,
-            cb: None, // No callback for exit signal
-            sub_tasks: SLinkedList::new(),
-        }))
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use io_buffer::Buffer;
+    use nix::errno::Errno;
+    use std::mem::size_of;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_ioevent() {
+        println!("IOEvent size {}", size_of::<IOEvent<ClosureCb>>());
+        println!("BufOrLen size {}", size_of::<crate::tasks::BufOrLen>());
+        println!("IOEventMerged size {}", size_of::<IOEventMerged<ClosureCb>>());
+        /*
+        let buffer = Buffer::aligned(4096).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
+        assert!(!event.is_done());
+        event.set_copied(4096);
+        assert!(event.is_done());
+        assert!(event.get_write_result().is_ok());
+
+        let buffer = Buffer::aligned(4096).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
+        event.set_error(Errno::EINTR as i32);
+        assert!(event.get_write_result().is_err());
+
+        let buffer = Buffer::aligned(4096).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
+        event.set_error(Errno::EINTR as i32);
+        let err = event.get_write_result().err().unwrap();
+        assert_eq!(err, Errno::EINTR);
+        */
     }
 }

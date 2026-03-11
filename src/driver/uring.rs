@@ -1,6 +1,6 @@
 use crate::callback_worker::Worker;
 use crate::context::CtxShared;
-use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent, IOEvent_};
+use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::BlockingRxTrait;
 use io_uring::{IoUring, opcode, types::*};
 use log::{error, info};
@@ -8,7 +8,7 @@ use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Du
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
-pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>, W: Worker<C>> {
+pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
     _marker: PhantomData<(C, Q, W)>,
 }
 
@@ -17,8 +17,11 @@ struct UringInner(UnsafeCell<IoUring>);
 unsafe impl Send for UringInner {}
 unsafe impl Sync for UringInner {}
 
-impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C> + Send + 'static>
-    UringDriver<C, Q, W>
+impl<
+    C: IOCallback,
+    Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
+    W: Worker<C> + Send + 'static,
+> UringDriver<C, Q, W>
 {
     pub fn start(ctx: Arc<CtxShared<C, Q, W>>) -> io::Result<()> {
         let depth = ctx.depth as u32;
@@ -92,79 +95,33 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
             if !events.is_empty() {
                 {
                     let mut sq = ring.submission();
-                    for event in events {
-                        let event = event;
+                    for mut event in events.drain(0..) {
                         let fd = event.fd;
 
                         let sqe = match event.action {
                             IOAction::Read => {
-                                if let BufOrLen::Buffer(buf) = &event.buf_or_len {
-                                    let (offset, buf_ptr, buf_len) = if event.res > 0 {
-                                        let progress = event.res as u64;
-                                        (
-                                            event.offset as u64 + progress,
-                                            unsafe {
-                                                (buf.as_ptr() as *mut u8).add(progress as usize)
-                                            },
-                                            (buf.len() as u64 - progress) as u32,
-                                        )
-                                    } else {
-                                        (
-                                            event.offset as u64,
-                                            buf.as_ptr() as *mut u8,
-                                            buf.len() as u32,
-                                        )
-                                    };
-                                    opcode::Read::new(Fd(fd), buf_ptr, buf_len)
-                                        .offset(offset)
-                                        .build()
-                                } else {
-                                    panic!("Read action without buffer");
-                                }
+                                let (offset, buf_ptr, buf_len) = event.get_param_for_io();
+                                opcode::Read::new(Fd(fd), buf_ptr, buf_len).offset(offset).build()
                             }
                             IOAction::Write => {
-                                if let BufOrLen::Buffer(buf) = &event.buf_or_len {
-                                    let (offset, buf_ptr, buf_len) = if event.res > 0 {
-                                        let progress = event.res as u64;
-                                        (
-                                            event.offset as u64 + progress,
-                                            unsafe {
-                                                (buf.as_ptr() as *mut u8).add(progress as usize)
-                                            },
-                                            (buf.len() as u64 - progress) as u32,
-                                        )
-                                    } else {
-                                        (
-                                            event.offset as u64,
-                                            buf.as_ptr() as *mut u8,
-                                            buf.len() as u32,
-                                        )
-                                    };
-                                    opcode::Write::new(Fd(fd), buf_ptr, buf_len)
-                                        .offset(offset)
-                                        .build()
-                                } else {
-                                    panic!("Write action without buffer");
-                                }
+                                let (offset, buf_ptr, buf_len) = event.get_param_for_io();
+                                opcode::Write::new(Fd(fd), buf_ptr, buf_len).offset(offset).build()
                             }
                             IOAction::Alloc => {
-                                if let BufOrLen::Len(len) = event.buf_or_len {
-                                    opcode::Fallocate::new(Fd(fd), len)
-                                        .offset(event.offset as u64)
-                                        .mode(0)
-                                        .build()
-                                } else {
-                                    panic!("Alloc action without length");
-                                }
+                                let len = event.get_size();
+                                opcode::Fallocate::new(Fd(fd), len)
+                                    .offset(event.offset as u64)
+                                    .mode(0)
+                                    .build()
                             }
                             IOAction::Fsync => opcode::Fsync::new(Fd(fd)).build(),
                         };
-                        let user_data = Box::into_raw(event.0) as u64;
+                        let user_data = Box::into_raw(event) as u64;
                         let sqe = sqe.user_data(user_data);
                         unsafe {
                             if let Err(_) = sq.push(&sqe) {
                                 error!("SQ full (should not happen)");
-                                let _ = Box::from_raw(user_data as *mut IOEvent_<C>);
+                                let _ = Box::from_raw(user_data as *mut IOEvent<C>);
                             }
                         }
                     }
@@ -199,8 +156,8 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                                 continue;
                             }
 
-                            let event_ptr = user_data as *mut IOEvent_<C>;
-                            let mut event = IOEvent(unsafe { Box::from_raw(event_ptr) });
+                            let event_ptr = user_data as *mut IOEvent<C>;
+                            let mut event: Box<IOEvent<C>> = unsafe { Box::from_raw(event_ptr) };
                             let res = cqe.result();
                             if res >= 0 {
                                 event.set_copied(res as usize);

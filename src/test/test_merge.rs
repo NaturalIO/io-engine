@@ -60,7 +60,7 @@ fn test_merged_submit_uring() {
     std::thread::sleep(Duration::from_secs(1));
 }
 
-fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 'static>(
+fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send + 'static>(
     fd: RawFd, sender: S, io_size: usize, batch_num: usize, merge_size_limit: usize,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
@@ -77,7 +77,7 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
     macro_rules! mk_cb {
         ($wg: expr) => {{
             let _guard: WaitGroupGuard<()> = $wg.add_guard();
-            ClosureCb(Box::new(move |_event: IOEvent<ClosureCb>| {
+            ClosureCb(Box::new(move |_offset, _buf, _res| {
                 drop(_guard);
             }))
         }};
@@ -124,14 +124,16 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
-            match _event.get_read_result() {
-                Ok(buffer) => {
-                    _buf_all.copy_from(offset, buffer.as_ref());
+            match res {
+                Ok(_len) => {
+                    if let Some(buffer) = buf {
+                        _buf_all.copy_from(offset, buffer.as_ref());
+                    }
                 }
-                Err(e) => {
-                    panic!("read error: {}", e);
+                Err(_e) => {
+                    panic!("read error: {}", _e);
                 }
             }
             drop(_guard);
@@ -147,14 +149,16 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
-            match _event.get_read_result() {
-                Ok(buffer) => {
-                    _buf_all.copy_from(offset, buffer.as_ref());
+            match res {
+                Ok(_len) => {
+                    if let Some(buffer) = buf {
+                        _buf_all.copy_from(offset, buffer.as_ref());
+                    }
                 }
-                Err(e) => {
-                    panic!("read error: {}", e);
+                Err(_e) => {
+                    panic!("read error: {}", _e);
                 }
             }
             drop(_guard);
@@ -169,14 +173,16 @@ fn _test_merge_submit<S: BlockingTxTrait<IOEvent<ClosureCb>> + Clone + Send + 's
         let _read_buf = read_buf.clone();
         let offset = i * io_size;
         let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |mut _event: IOEvent<ClosureCb>| {
+        event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
             let mut _buf_all = _read_buf.lock().unwrap();
-            match _event.get_read_result() {
-                Ok(buffer) => {
-                    _buf_all.copy_from(offset, buffer.as_ref());
+            match res {
+                Ok(_len) => {
+                    if let Some(buffer) = buf {
+                        _buf_all.copy_from(offset, buffer.as_ref());
+                    }
                 }
-                Err(e) => {
-                    panic!("read error: {}", e);
+                Err(_e) => {
+                    panic!("read error: {}", _e);
                 }
             }
             drop(_guard);

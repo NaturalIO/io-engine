@@ -36,9 +36,10 @@
 //! }
 //!
 //! impl IOCallback for MyCallback {
-//!     fn call(self, event: IOEvent<Self>) {
-//!         if event.is_done() {
-//!             println!("Operation {} completed, result len: {}", self.id, event.get_size());
+//!     fn call(self, _offset: i64, buf: Option<io_buffer::Buffer>, res: Result<u32, i32>) {
+//!         match res {
+//!             Ok(len) => println!("Operation {} completed, result len: {}", self.id, len),
+//!             Err(e) => println!("Operation {} failed, error: {}", self.id, e),
 //!         }
 //!     }
 //! }
@@ -86,49 +87,27 @@
 //!     queue_tx: &crossfire::MTx<mpsc::Array<IOEvent<ClosureCb>>>,
 //! ) -> Result<Buffer, String> {
 //!     let total_len = buf.len();
-//!     let (tx, mut rx) = oneshot::oneshot();
+//!     let (tx, rx) = oneshot::oneshot();
 //!
-//!     // Submit initial read
+//!     // Submit read
 //!     let mut event = IOEvent::new(fd, buf, IOAction::Read, offset as i64);
-//!     event.set_callback(ClosureCb(Box::new(move |evt| {
-//!         let _ = tx.send(evt);
+//!     event.set_callback(ClosureCb(Box::new(move |_offset, read_buf, res| {
+//!         let _ = tx.send((read_buf, res));
 //!     })));
 //!     queue_tx.send(event).expect("submit");
 //!
-//!     loop {
-//!         let mut event = rx.await.map_err(|_| "Channel error")?;
+//!     // Wait for completion
+//!     let (read_buf, res) = rx.await.map_err(|_| "Channel error")?;
+//!     let n = res.map_err(|_| "IO error")? as usize;
 //!
-//!         // Check result
-//!         let n = event.get_result().map_err(|_| "IO error")?;
-//!
-//!         if n >= total_len {
-//!             // Complete
-//!             let mut buf = event.get_read_result().map_err(|_| "Get buffer error")?;
-//!             buf.set_len(n);
-//!             return Ok(buf);
-//!         }
-//!
-//!         // Short read detected
-//!         // NOTE: In production code, you should check if this is EOF by comparing
-//!         // (offset + n) with the file size to distinguish between:
-//!         // - EOF: reached end of file, return partial data
-//!         // - Short read: temporary condition, retry needed
-//!         // For example:
-//!         // if offset + n >= file_size {
-//!         //     // EOF - return what we have
-//!         //     let mut buf = event.get_read_result()?;
-//!         //     buf.set_len(n);
-//!         //     return Ok(buf);
-//!         // }
-//!
-//!         // Short read but not EOF - retry with new oneshot channel
-//!         let (tx, new_rx) = oneshot::oneshot();
-//!         rx = new_rx;
-//!
-//!         event.set_callback(ClosureCb(Box::new(move |evt| {
-//!             let _ = tx.send(evt);
-//!         })));
-//!         queue_tx.send(event).expect("resubmit");
+//!     if n >= total_len {
+//!         // Complete
+//!         let mut buf = read_buf.ok_or("Buffer is None")?;
+//!         buf.set_len(n);
+//!         Ok(buf)
+//!     } else {
+//!         // Short read - in production, retry with remaining buffer
+//!         Err("Short read".to_string())
 //!     }
 //! }
 //! ```
@@ -175,31 +154,31 @@
 //!
 //!     // Create oneshot for this event's completion
 //!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |event| {
-//!         let _ = done_tx.send(event);
+//!     event.set_callback(ClosureCb(Box::new(move |_offset, _buf, res| {
+//!         let _ = done_tx.send(res);
 //!     })));
 //!
 //!     // Send to engine
-//!     tx.send(event).expect("submit");
+//!     tx.send(Box::new(event)).expect("submit");
 //!
 //!     // 5. Wait for completion
-//!     let event = done_rx.recv().unwrap();
-//!     assert!(event.is_done());
-//!     event.get_write_result().expect("Write failed");
+//!     let res = done_rx.recv().unwrap();
+//!     res.map_err(|_| "Write failed").expect("Write failed");
 //!
 //!     // 6. Submit a Read
 //!     let buffer = Buffer::aligned(4096).unwrap();
 //!     let mut event = IOEvent::new(fd, buffer, IOAction::Read, 0);
 //!
 //!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |event| {
-//!         let _ = done_tx.send(event);
+//!     event.set_callback(ClosureCb(Box::new(move |_offset, buf, res| {
+//!         let _ = done_tx.send((buf, res));
 //!     })));
 //!
-//!     tx.send(event).expect("submit");
+//!     tx.send(Box::new(event)).expect("submit");
 //!
-//!     let mut event = done_rx.recv().unwrap();
-//!     let read_buf = event.get_read_result().expect("Read failed");
+//!     let (read_buf, res) = done_rx.recv().unwrap();
+//!     let _ = res.expect("Read failed");
+//!     let read_buf = read_buf.expect("Read buffer is None");
 //!     assert_eq!(read_buf.len(), 4096);
 //!     assert_eq!(read_buf[0], 65);
 //! }

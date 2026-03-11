@@ -2,11 +2,12 @@ use crate::callback_worker::Worker;
 use nix::unistd::fsync;
 
 use crate::context::CtxShared;
-use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent};
+use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::{BlockingRxTrait, Rx, Tx, spsc};
 use nix::errno::Errno;
 use std::collections::VecDeque;
 use std::fs::File;
+use std::os::fd::RawFd;
 use std::os::unix::io::BorrowedFd;
 use std::{
     cell::UnsafeCell,
@@ -20,7 +21,7 @@ use std::{
 
 pub struct AioSlot<C: IOCallback> {
     pub(crate) iocb: iocb,
-    pub(crate) event: Option<IOEvent<C>>,
+    pub(crate) event: Option<Box<IOEvent<C>>>,
 }
 
 impl<C: IOCallback> AioSlot<C> {
@@ -28,38 +29,26 @@ impl<C: IOCallback> AioSlot<C> {
         Self { iocb: iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() }, event: None }
     }
 
+    pub fn fill_exit_slot(&mut self, slot_id: u16, fd: RawFd) {
+        let iocb = &mut self.iocb;
+        iocb.aio_data = slot_id as libc::__u64;
+        iocb.aio_fildes = fd as libc::__u32;
+        iocb.aio_lio_opcode = IOAction::Read as u16;
+        iocb.aio_buf = 0;
+        iocb.aio_nbytes = 0;
+        iocb.aio_offset = 0;
+    }
+
     #[inline(always)]
-    pub fn fill_slot(&mut self, event: IOEvent<C>, slot_id: u16) {
+    pub fn fill_buffer_slot(&mut self, slot_id: u16, mut event: Box<IOEvent<C>>) {
         let iocb = &mut self.iocb;
         iocb.aio_data = slot_id as libc::__u64;
         iocb.aio_fildes = event.fd as libc::__u32;
-
-        match &event.buf_or_len {
-            BufOrLen::Buffer(buf) => {
-                iocb.aio_lio_opcode = event.action as u16;
-                if event.res > 0 {
-                    let progress = event.res as u64;
-                    iocb.aio_buf = (buf.get_raw() as u64) + progress;
-                    iocb.aio_nbytes = (buf.len() as u64) - progress;
-                    iocb.aio_offset = event.offset + (progress as i64);
-                } else {
-                    iocb.aio_buf = buf.get_raw() as u64;
-                    iocb.aio_nbytes = buf.len() as u64;
-                    iocb.aio_offset = event.offset;
-                }
-            }
-            BufOrLen::Len(0) => {
-                // This is for new_exit_signal
-                iocb.aio_lio_opcode = IOAction::Read as u16;
-                iocb.aio_buf = 0;
-                iocb.aio_nbytes = 0;
-                iocb.aio_offset = event.offset;
-            }
-            BufOrLen::Len(_) => {
-                // This is for Alloc/Fsync with actual length
-                // These are now handled by the background worker, so this path should not be taken.
-            }
-        }
+        let (_offset, p, l) = event.get_param_for_io();
+        iocb.aio_lio_opcode = event.action as u16;
+        iocb.aio_buf = p as u64;
+        iocb.aio_nbytes = l as u64;
+        iocb.aio_offset = _offset as i64;
         self.event.replace(event);
     }
 
@@ -90,12 +79,15 @@ struct AioInner<C: IOCallback> {
 unsafe impl<C: IOCallback> Send for AioInner<C> {}
 unsafe impl<C: IOCallback> Sync for AioInner<C> {}
 
-pub struct AioDriver<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>>, W: Worker<C>> {
+pub struct AioDriver<C: IOCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
     _marker: std::marker::PhantomData<(C, Q, W)>,
 }
 
-impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C> + Send + 'static>
-    AioDriver<C, Q, W>
+impl<
+    C: IOCallback,
+    Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
+    W: Worker<C> + Send + 'static,
+> AioDriver<C, Q, W>
 {
     pub fn start(ctx: Arc<CtxShared<C, Q, W>>) -> io::Result<()> {
         let depth = ctx.depth;
@@ -130,20 +122,16 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
         Ok(())
     }
 
-    fn background_worker(ctx: Arc<CtxShared<C, Q, W>>, rx: Rx<spsc::Array<IOEvent<C>>>) {
+    /// This worker process IOEvent fallocate & fsync
+    fn background_worker(ctx: Arc<CtxShared<C, Q, W>>, rx: Rx<spsc::Array<Box<IOEvent<C>>>>) {
         loop {
             match rx.recv() {
                 Ok(mut event) => {
+                    let size = event.get_size() as i64;
                     let res = match event.action {
                         IOAction::Alloc => {
-                            if let BufOrLen::Len(len) = event.buf_or_len {
-                                let ret = unsafe {
-                                    libc::fallocate(event.fd, 0, event.offset, len as libc::off_t)
-                                };
-                                if ret == -1 { -Errno::last_raw() } else { 0 }
-                            } else {
-                                -libc::EINVAL
-                            }
+                            let ret = unsafe { libc::fallocate(event.fd, 0, event.offset, size) };
+                            if ret == -1 { -Errno::last_raw() } else { 0 }
                         }
                         IOAction::Fsync => fsync(unsafe { BorrowedFd::borrow_raw(event.fd) })
                             .map_or_else(|e| -(e as i32), |_| 0),
@@ -151,11 +139,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                     };
 
                     if res == 0 {
-                        if let BufOrLen::Len(len) = event.buf_or_len {
-                            event.set_copied(len as usize);
-                        } else {
-                            event.set_copied(0);
-                        }
+                        event.set_copied(size as usize);
                     } else {
                         event.set_error(-res);
                     }
@@ -177,7 +161,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
         let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
         let aio_context = inner.context;
         let mut events_to_process = VecDeque::with_capacity(depth);
-        let mut background_channel_tx: Option<Tx<spsc::Array<IOEvent<C>>>> = None;
+        let mut background_channel_tx: Option<Tx<spsc::Array<Box<IOEvent<C>>>>> = None;
 
         loop {
             // 1. Fetch events
@@ -187,7 +171,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                     Ok(event) => match event.action {
                         IOAction::Alloc | IOAction::Fsync => {
                             if background_channel_tx.is_none() {
-                                let (tx, rx) = spsc::bounded_blocking::<IOEvent<C>>(depth);
+                                let (tx, rx) = spsc::bounded_blocking::<Box<IOEvent<C>>>(depth);
                                 let ctx_clone = ctx.clone();
                                 thread::spawn(move || Self::background_worker(ctx_clone, rx));
                                 background_channel_tx = Some(tx);
@@ -207,9 +191,9 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                         // We need a free slot to submit the exit signal.
                         // We block to get one because we must signal exit to the poller.
                         let slot_id = free_recv.recv().unwrap();
-                        let exit_event = IOEvent::new_exit_signal(inner.null_file.as_raw_fd());
+
                         let slot = &mut slots_ref[slot_id as usize];
-                        slot.fill_slot(exit_event, slot_id);
+                        slot.fill_exit_slot(slot_id, inner.null_file.as_raw_fd());
                         let mut iocb_ptr: *mut iocb = &mut slot.iocb as *mut _;
 
                         let _ = ctx.free_slots_count.fetch_sub(1, Ordering::SeqCst);
@@ -255,7 +239,7 @@ impl<C: IOCallback, Q: BlockingRxTrait<IOEvent<C>> + Send + 'static, W: Worker<C
                     first = false;
                     let event = events_to_process.pop_front().unwrap();
                     let slot = &mut slots_ref[slot_id as usize];
-                    slot.fill_slot(event, slot_id);
+                    slot.fill_buffer_slot(slot_id, event);
                     iocbs.push(&mut slot.iocb as *mut iocb);
                 } else {
                     // No more slots available right now

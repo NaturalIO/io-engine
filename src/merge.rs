@@ -32,13 +32,23 @@
 //! - [`MergeBuffer`]: Internal buffer logic.
 //! - [`MergeSubmitter`]: Wraps a sender channel and manages the merge logic before sending.
 
-use crate::tasks::{BufOrLen, IOAction, IOCallback, IOEvent, IOEvent_};
+use crate::tasks::{IOAction, IOCallback, IOEvent, IOEventMerged};
 use crossfire::BlockingTxTrait;
-use embed_collections::slist::SLinkedList;
+use embed_collections::SegList;
 use io_buffer::Buffer;
 use libc;
 use std::io;
 use std::os::fd::RawFd;
+
+/// Info about the first event and merged state.
+struct MergedInfo<C: IOCallback> {
+    /// First event stored as Box<IOEvent> to allow reuse when merging.
+    first_event: Box<IOEvent<C>>,
+    /// Tail offset: next contiguous address that can be merged.
+    tail_offset: i64,
+    /// Total size of all events including the first.
+    total_size: usize,
+}
 
 /// Buffers sequential IO events for merging.
 ///
@@ -47,9 +57,9 @@ use std::os::fd::RawFd;
 /// the merge upper bound is specified in `merge_size_limit`.
 pub struct MergeBuffer<C: IOCallback> {
     pub merge_size_limit: usize,
-    merged_events: SLinkedList<Box<IOEvent_<C>>, ()>,
-    merged_offset: i64,
-    merged_data_size: usize,
+    merged_info: Option<MergedInfo<C>>,
+    /// Subsequent events stored as IOEventMerged for cache-friendly storage.
+    merged_events: SegList<IOEventMerged<C>>,
 }
 
 impl<C: IOCallback> MergeBuffer<C> {
@@ -59,12 +69,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// * `merge_size_limit` - The maximum total data size to produce a merged event.
     #[inline(always)]
     pub fn new(merge_size_limit: usize) -> Self {
-        Self {
-            merge_size_limit,
-            merged_events: SLinkedList::new(),
-            merged_offset: -1,
-            merged_data_size: 0,
-        }
+        Self { merge_size_limit, merged_info: None, merged_events: SegList::new() }
     }
 
     /// Checks if a new event can be added to the current buffer for merging.
@@ -81,11 +86,11 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// `true` if the event can be added, `false` otherwise.
     #[inline(always)]
     pub fn may_add_event(&mut self, event: &IOEvent<C>) -> bool {
-        if !self.merged_events.is_empty() {
-            if self.merged_data_size + event.get_size() > self.merge_size_limit {
+        if let Some(ref info) = self.merged_info {
+            if event.get_size() as usize > self.merge_size_limit {
                 return false;
             }
-            return self.merged_offset + self.merged_data_size as i64 == event.offset;
+            return info.tail_offset == event.offset;
         } else {
             return true;
         }
@@ -107,39 +112,90 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// `true` if the buffer size has reached or exceeded `merge_size_limit` after adding the event, `false` otherwise.
     #[inline(always)]
     pub fn push_event(&mut self, event: IOEvent<C>) -> bool {
-        if self.merged_events.is_empty() {
-            self.merged_offset = event.offset;
+        if let Some(ref mut info) = self.merged_info {
+            // Safety check: ensure may_add_event was called
+            debug_assert_eq!(info.tail_offset, event.offset, "push_event: event not contiguous");
+            debug_assert!(
+                info.total_size + event.get_size() as usize <= self.merge_size_limit,
+                "push_event: exceeds merge_size_limit"
+            );
+            // If this is the second event, move first event's buffer to merged_events
+            if self.merged_events.is_empty() {
+                let first_merged = info.first_event.extract_merged();
+                self.merged_events.push(first_merged);
+            }
+            // Subsequent events: convert to IOEventMerged and store in SegList
+            info.total_size += event.get_size() as usize;
+            info.tail_offset += event.get_size() as i64;
+            self.merged_events.push(event.into_merged());
+            return info.total_size >= self.merge_size_limit;
+        } else {
+            // First event: store as Box<IOEvent> for potential reuse
+            let size = event.get_size() as usize;
+            let offset = event.offset;
+            self.merged_info = Some(MergedInfo {
+                first_event: Box::new(event),
+                tail_offset: offset + size as i64,
+                total_size: size,
+            });
+            return size >= self.merge_size_limit;
         }
-        self.merged_data_size += event.get_size();
-        event.push_to_list(&mut self.merged_events);
-
-        return self.merged_data_size >= self.merge_size_limit;
     }
 
     /// Returns the number of events currently in the buffer.
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.merged_events.len()
+        if !self.merged_events.is_empty() {
+            // First event buffer moved to merged_events, count is merged_events.len()
+            self.merged_events.len()
+        } else {
+            // Single event or empty
+            self.merged_info.as_ref().map(|_| 1).unwrap_or(0)
+        }
     }
 
-    /// Takes all buffered events and their merging metadata, resetting the buffer.
-    ///
-    /// This is an internal helper method.
-    ///
-    /// # Returns
-    /// A tuple containing:
-    /// - The `SLinkedList` of buffered events.
-    /// - The starting offset of the merged events.
-    /// - The total data size of the merged events.
+    /// Takes all buffered events, building merged buffer if needed.
+    /// Returns the master event (Box<IOEvent>) or None if empty.
     #[inline(always)]
-    fn take(&mut self) -> (SLinkedList<Box<IOEvent_<C>>, ()>, i64, usize) {
-        // Move the list content out by swapping with empty new list
-        let tasks = std::mem::replace(&mut self.merged_events, SLinkedList::new());
-        let merged_data_size = self.merged_data_size;
-        let merged_offset = self.merged_offset;
-        self.merged_offset = -1;
-        self.merged_data_size = 0;
-        (tasks, merged_offset, merged_data_size)
+    fn take(&mut self, action: IOAction) -> Option<Box<IOEvent<C>>> {
+        let info = self.merged_info.take()?;
+
+        // Single event: return directly without mem::replace
+        if self.merged_events.is_empty() {
+            return Some(info.first_event);
+        }
+
+        // Multiple events: take merged_events and build merged buffer
+        let sub_tasks = std::mem::replace(&mut self.merged_events, SegList::new());
+        debug_assert!(sub_tasks.len() > 1);
+        let size = info.total_size;
+        let offset = info.first_event.offset;
+
+        match Buffer::aligned(size as i32) {
+            Ok(mut buffer) => {
+                if action == IOAction::Write {
+                    let mut write_offset = 0;
+                    for merged in sub_tasks.iter() {
+                        buffer.copy_from(write_offset, merged.buf.as_ref());
+                        write_offset += merged.buf.len();
+                    }
+                }
+
+                // Reuse first_event as master, set merged buffer and subtasks
+                let mut master = info.first_event;
+                master.set_merged_tasks(buffer, sub_tasks);
+                Some(master)
+            }
+            Err(_) => {
+                // Allocation failed: error out all events
+                for merged in sub_tasks.drain() {
+                    if let Some(cb) = merged.cb {
+                        cb.call(offset, Some(merged.buf), Err(-libc::ENOMEM));
+                    }
+                }
+                None
+            }
+        }
     }
 
     /// Flushes the buffered events, potentially merging them into a single [`IOEvent`].
@@ -148,7 +204,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// - If the buffer is empty, it returns `None`.
     /// - If there is a single event, it returns `Some(event)` with the original event.
     /// - If there are multiple events, it attempts to merge them:
-    ///   - If successful, a new master [`IOEvent`] covering the merged range is returned as `Some(merged_event)`.
+    ///   - If successful, reuses the first `Box<IOEvent>` as the master event, replacing its buffer.
     ///   - If buffer allocation for the merged event fails, all original events are marked with an `ENOMEM` error and their callbacks are triggered, then `None` is returned.
     /// - This function will always override fd in IOEvent with argument
     ///
@@ -162,46 +218,9 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// An `Option<IOEvent<C>>` representing the merged event, a single original event, or `None` if the buffer was empty or merging failed.
     #[inline]
     pub fn flush(&mut self, fd: RawFd, action: IOAction) -> Option<IOEvent<C>> {
-        let batch_len = self.len();
-        if batch_len == 0 {
-            return None;
-        }
-        if batch_len == 1 {
-            self.merged_offset = -1;
-            self.merged_data_size = 0;
-            let mut event = IOEvent::pop_from_list(&mut self.merged_events).unwrap();
-            // NOTE: always reset fd, allow false fd while adding
-            event.set_fd(fd);
-            return Some(event);
-        }
-        let (mut tasks, offset, size) = self.take();
-        log_assert!(size > 0);
-
-        match Buffer::aligned(size as i32) {
-            Ok(mut buffer) => {
-                if action == IOAction::Write {
-                    let mut _offset = 0;
-                    for event_box in tasks.iter() {
-                        if let BufOrLen::Buffer(b) = &event_box.buf_or_len {
-                            let _size = b.len();
-                            buffer.copy_from(_offset, b.as_ref());
-                            _offset += _size;
-                        }
-                    }
-                }
-                let mut event = IOEvent::<C>::new(fd, buffer, action, offset);
-                event.set_subtasks(tasks);
-                Some(event)
-            }
-            Err(e) => {
-                warn!("mio: alloc buffer size {} failed: {}", size, e);
-                while let Some(mut event) = IOEvent::<C>::pop_from_list(&mut tasks) {
-                    event.set_error(libc::ENOMEM);
-                    event.callback();
-                }
-                None
-            }
-        }
+        let mut master = self.take(action)?;
+        master.set_fd(fd);
+        Some(*master)
     }
 }
 
@@ -211,14 +230,14 @@ impl<C: IOCallback> MergeBuffer<C> {
 /// This component buffers incoming [`IOEvent`]s into a [`MergeBuffer`].
 /// It ensures that events for the same file descriptor and IO action are
 /// considered for merging to optimize system calls.
-pub struct MergeSubmitter<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> {
+pub struct MergeSubmitter<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> {
     fd: RawFd,
     buffer: MergeBuffer<C>,
     sender: S,
     action: IOAction,
 }
 
-impl<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> MergeSubmitter<C, S> {
+impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// Creates a new `MergeSubmitter`.
     ///
     /// # Arguments
@@ -248,7 +267,7 @@ impl<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> MergeSubmitter<C, S> {
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
 
-        if event_size >= self.buffer.merge_size_limit || !self.buffer.may_add_event(&event) {
+        if event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event) {
             if let Err(e) = self._flush() {
                 event.callback();
                 return Err(e);
@@ -273,7 +292,7 @@ impl<C: IOCallback, S: BlockingTxTrait<IOEvent<C>>> MergeSubmitter<C, S> {
         if let Some(event) = self.buffer.flush(self.fd, self.action) {
             trace!("mio: submit event from flush {:?}", event);
             self.sender
-                .send(event)
+                .send(Box::new(event))
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "Queue closed"))?;
         }
         Ok(())

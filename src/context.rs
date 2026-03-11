@@ -52,7 +52,7 @@ pub struct IOContext<C: IOCallback, Q, W> {
 
 impl<C: IOCallback, Q, W> IOContext<C, Q, W>
 where
-    Q: BlockingRxTrait<IOEvent<C>> + Send + 'static,
+    Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
     W: Worker<C> + Send + 'static,
 {
     pub fn new(

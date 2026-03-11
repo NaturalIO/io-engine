@@ -6,21 +6,21 @@ use crossfire::{MTx, Tx, flavor::Flavor, mpmc};
 /// This allows using either `IOWorkers` (wrappers around channels) or direct channels
 /// (`MTx`, `Tx`) or any other sink, or even process inline.
 pub trait Worker<C: IOCallback>: Send + 'static {
-    fn done(&self, event: IOEvent<C>);
+    fn done(&self, event: Box<IOEvent<C>>);
 }
 
 /// Implement with crossfire::mpmc, can be shared among multiple IOContext instances.
-pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<IOEvent<C>>>);
+pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
 
 impl<C: IOCallback> IOWorkers<C> {
     pub fn new(workers: usize) -> Self {
-        let (tx, rx) = mpmc::bounded_blocking::<IOEvent<C>>(100000);
+        let (tx, rx) = mpmc::bounded_blocking::<Box<IOEvent<C>>>(100000);
         for _i in 0..workers {
             let _rx = rx.clone();
             std::thread::spawn(move || {
                 loop {
                     match _rx.recv() {
-                        Ok(event) => event.callback_merged(),
+                        Ok(event) => event.callback(),
                         Err(_) => {
                             debug!("IOWorkers exit");
                             return;
@@ -40,7 +40,7 @@ impl<C: IOCallback> Clone for IOWorkers<C> {
 }
 
 impl<C: IOCallback> Worker<C> for IOWorkers<C> {
-    fn done(&self, item: IOEvent<C>) {
+    fn done(&self, item: Box<IOEvent<C>>) {
         let _ = self.0.send(item);
     }
 }
@@ -48,10 +48,10 @@ impl<C: IOCallback> Worker<C> for IOWorkers<C> {
 // Implement Worker for Crossfire MTx (Multi-Producer)
 impl<C, F> Worker<C> for MTx<F>
 where
-    F: Flavor<Item = IOEvent<C>> + crossfire::flavor::FlavorMP,
+    F: Flavor<Item = Box<IOEvent<C>>>,
     C: IOCallback,
 {
-    fn done(&self, item: IOEvent<C>) {
+    fn done(&self, item: Box<IOEvent<C>>) {
         let _ = self.send(item);
     }
 }
@@ -59,10 +59,10 @@ where
 // Implement Worker for Crossfire Tx (Single-Producer)
 impl<C, F> Worker<C> for Tx<F>
 where
-    F: Flavor<Item = IOEvent<C>>,
+    F: Flavor<Item = Box<IOEvent<C>>>,
     C: IOCallback,
 {
-    fn done(&self, item: IOEvent<C>) {
+    fn done(&self, item: Box<IOEvent<C>>) {
         let _ = self.send(item);
     }
 }
@@ -72,7 +72,7 @@ where
 pub struct Inline;
 
 impl<C: IOCallback> Worker<C> for Inline {
-    fn done(&self, event: IOEvent<C>) {
-        event.callback_merged();
+    fn done(&self, event: Box<IOEvent<C>>) {
+        event.callback();
     }
 }

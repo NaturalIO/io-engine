@@ -19,14 +19,14 @@ fn test_fallocate() {
 
     let (done_tx, done_rx) = unbounded();
 
-    let cb = ClosureCb(Box::new(move |event: IOEvent<ClosureCb>| {
-        assert!(event.get_result().is_ok());
+    let cb = ClosureCb(Box::new(move |_offset, _buf, res| {
+        assert!(res.is_ok());
         done_tx.send(()).unwrap();
     }));
 
     let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, 4096);
     event.set_callback(cb);
-    tx.send(event).unwrap();
+    tx.send(Box::new(event)).unwrap();
 
     // Wait for completion
     done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -47,14 +47,14 @@ fn test_fsync() {
 
     let (done_tx, done_rx) = unbounded();
 
-    let cb = ClosureCb(Box::new(move |event: IOEvent<ClosureCb>| {
-        assert!(event.get_result().is_ok());
+    let cb = ClosureCb(Box::new(move |_offset, _buf, res| {
+        assert!(res.is_ok());
         done_tx.send(()).unwrap();
     }));
 
     let mut event = IOEvent::new_no_buf(fd, IOAction::Fsync, 0, 0);
     event.set_callback(cb);
-    tx.send(event).unwrap();
+    tx.send(Box::new(event)).unwrap();
 
     // Wait for completion
     done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
