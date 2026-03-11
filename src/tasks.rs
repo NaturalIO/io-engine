@@ -175,11 +175,6 @@ impl<C: IOCallback> IOEvent<C> {
     }
 
     #[inline(always)]
-    pub fn is_done(&self) -> bool {
-        self.res != i32::MIN
-    }
-
-    #[inline(always)]
     pub fn get_write_result(self) -> Result<(), Errno> {
         let res = self.res;
         if res >= 0 {
@@ -321,28 +316,232 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn test_ioevent() {
+    fn test_ioevent_size() {
         println!("IOEvent size {}", size_of::<IOEvent<ClosureCb>>());
         println!("BufOrLen size {}", size_of::<crate::tasks::BufOrLen>());
         println!("IOEventMerged size {}", size_of::<IOEventMerged<ClosureCb>>());
-        /*
-        let buffer = Buffer::aligned(4096).unwrap();
-        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
-        assert!(!event.is_done());
+    }
+
+    /// Test normal callback (non-merged case)
+    #[test]
+    fn test_callback_normal() {
+        let buffer = Buffer::alloc(4096).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 1024);
+
+        let result = Arc::new(std::sync::Mutex::new(None));
+        let result_clone = result.clone();
+
+        event.set_callback(ClosureCb(Box::new(move |offset, buf, res| {
+            *result_clone.lock().unwrap() = Some((offset, buf, res));
+        })));
+
         event.set_copied(4096);
-        assert!(event.is_done());
-        assert!(event.get_write_result().is_ok());
+        event.callback();
 
-        let buffer = Buffer::aligned(4096).unwrap();
-        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
-        event.set_error(Errno::EINTR as i32);
-        assert!(event.get_write_result().is_err());
+        let (offset, buf, res) = result.lock().unwrap().take().unwrap();
+        assert_eq!(offset, 1024);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), 4096);
+        assert!(buf.is_some());
+    }
 
-        let buffer = Buffer::aligned(4096).unwrap();
-        let mut event = IOEvent::<ClosureCb>::new(0, buffer, IOAction::Write, 0);
-        event.set_error(Errno::EINTR as i32);
-        let err = event.get_write_result().err().unwrap();
-        assert_eq!(err, Errno::EINTR);
-        */
+    /// Test merged read callback - verifies offset correctness
+    #[test]
+    fn test_callback_merged_read() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        let offsets = Arc::new([AtomicI64::new(0), AtomicI64::new(0), AtomicI64::new(0)]);
+        let offsets_clone = offsets.clone();
+
+        // Create sub-tasks with their own buffers first
+        let mut sub_tasks = SegList::new();
+
+        // First sub-task: 16 bytes at offset 1000
+        let buf1 = Buffer::alloc(16).unwrap();
+        sub_tasks.push(IOEventMerged {
+            buf: buf1,
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                offsets_clone[0].store(offset, Ordering::SeqCst);
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        // Second sub-task: 16 bytes at offset 1016
+        let buf2 = Buffer::alloc(16).unwrap();
+        let offsets_clone2 = offsets.clone();
+        sub_tasks.push(IOEventMerged {
+            buf: buf2,
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                offsets_clone2[1].store(offset, Ordering::SeqCst);
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        // Third sub-task: 16 bytes at offset 1032
+        let buf3 = Buffer::alloc(16).unwrap();
+        let offsets_clone3 = offsets.clone();
+        sub_tasks.push(IOEventMerged {
+            buf: buf3,
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                offsets_clone3[2].store(offset, Ordering::SeqCst);
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        // Create parent buffer and event
+        let parent_buf = Buffer::alloc(48).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, parent_buf, IOAction::Read, 1000);
+        event.set_copied(48); // 48 bytes read
+
+        // Get the parent buffer back and fill with data
+        let parent_buf = match std::mem::replace(&mut event.buf_or_len, BufOrLen::Len(0)) {
+            BufOrLen::Buffer(buf) => buf,
+            BufOrLen::Len(_) => panic!("expected buffer"),
+        };
+        let mut parent_buf = parent_buf;
+        parent_buf.copy_from(0, b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()");
+
+        event.set_merged_tasks(parent_buf, sub_tasks);
+        event.callback(); // Should invoke all callbacks
+
+        // Verify offsets
+        assert_eq!(offsets[0].load(Ordering::SeqCst), 1000);
+        assert_eq!(offsets[1].load(Ordering::SeqCst), 1016);
+        assert_eq!(offsets[2].load(Ordering::SeqCst), 1032);
+    }
+
+    /// Test merged write callback - verifies offset correctness
+    #[test]
+    fn test_callback_merged_write() {
+        // For write, parent buffer contains data that was written
+        let parent_buf = Buffer::alloc(4096).unwrap();
+
+        let mut event = IOEvent::<ClosureCb>::new(0, parent_buf, IOAction::Write, 2000);
+        event.set_copied(48); // All 48 bytes written
+
+        let mut sub_tasks = SegList::new();
+
+        // First sub-task: 16 bytes at offset 2000
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                assert_eq!(offset, 2000, "first write callback offset");
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        // Second sub-task: 16 bytes at offset 2016
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                assert_eq!(offset, 2016, "second write callback offset");
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        // Third sub-task: 16 bytes at offset 2032
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                assert_eq!(offset, 2032, "third write callback offset");
+                assert!(res.is_ok());
+                assert_eq!(res.unwrap(), 16);
+            }))),
+        });
+
+        event.set_merged_tasks(Buffer::alloc(4096).unwrap(), sub_tasks);
+        event.callback(); // Should invoke all callbacks with correct offsets
+    }
+
+    /// Test merged callback with error result
+    #[test]
+    fn test_callback_merged_error() {
+        let parent_buf = Buffer::alloc(4096).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, parent_buf, IOAction::Read, 3000);
+        event.set_error(Errno::EIO as i32); // IO error
+
+        let mut sub_tasks = SegList::new();
+
+        // First sub-task
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, buf, res| {
+                assert_eq!(offset, 3000, "error callback offset");
+                assert!(res.is_err());
+                assert_eq!(res.err().unwrap(), Errno::EIO as i32);
+                assert!(buf.is_some()); // Buffer returned on error
+            }))),
+        });
+
+        // Second sub-task
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, buf, res| {
+                assert_eq!(offset, 3016, "error callback offset 2");
+                assert!(res.is_err());
+                assert!(buf.is_some());
+            }))),
+        });
+
+        event.set_merged_tasks(Buffer::alloc(48).unwrap(), sub_tasks);
+        event.callback();
+    }
+
+    /// Test short read in merged callback
+    #[test]
+    fn test_callback_merged_short_read() {
+        use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+
+        let offsets = Arc::new([AtomicI64::new(0), AtomicI64::new(0)]);
+        let results = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
+        let offsets_clone = offsets.clone();
+        let results_clone = results.clone();
+
+        let mut sub_tasks = SegList::new();
+
+        // First sub-task: 16 bytes (fully read)
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                offsets_clone[0].store(offset, Ordering::SeqCst);
+                results_clone[0].store(res.unwrap(), Ordering::SeqCst);
+            }))),
+        });
+
+        // Second sub-task: 16 bytes but only 8 were read (short read)
+        let offsets_clone2 = offsets.clone();
+        let results_clone2 = results.clone();
+        sub_tasks.push(IOEventMerged {
+            buf: Buffer::alloc(16).unwrap(),
+            cb: Some(ClosureCb(Box::new(move |offset, _buf, res| {
+                offsets_clone2[1].store(offset, Ordering::SeqCst);
+                results_clone2[1].store(res.unwrap(), Ordering::SeqCst);
+            }))),
+        });
+
+        // Parent buffer with 32 bytes
+        let parent_buf = Buffer::alloc(32).unwrap();
+        let mut event = IOEvent::<ClosureCb>::new(0, parent_buf, IOAction::Read, 4000);
+        event.set_copied(24); // Short read: only 24 bytes (16 + 8)
+
+        // Get parent buffer back
+        let parent_buf = match std::mem::replace(&mut event.buf_or_len, BufOrLen::Len(0)) {
+            BufOrLen::Buffer(buf) => buf,
+            BufOrLen::Len(_) => panic!("expected buffer"),
+        };
+
+        event.set_merged_tasks(parent_buf, sub_tasks);
+        event.callback();
+
+        // Verify
+        assert_eq!(offsets[0].load(Ordering::SeqCst), 4000);
+        assert_eq!(results[0].load(Ordering::SeqCst), 16);
+        assert_eq!(offsets[1].load(Ordering::SeqCst), 4016);
+        assert_eq!(results[1].load(Ordering::SeqCst), 8); // Short read
     }
 }
