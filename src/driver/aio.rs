@@ -1,4 +1,5 @@
 use crate::callback_worker::Worker;
+use nix::fcntl::{FallocateFlags, fallocate};
 use nix::unistd::fsync;
 
 use crate::context::CtxShared;
@@ -130,8 +131,9 @@ impl<
                     let size = event.get_size() as i64;
                     let res = match event.action {
                         IOAction::Alloc => {
-                            let ret = unsafe { libc::fallocate(event.fd, 0, event.offset, size) };
-                            if ret == -1 { -Errno::last_raw() } else { 0 }
+                            let fd = unsafe { BorrowedFd::borrow_raw(event.fd) };
+                            fallocate(fd, FallocateFlags::empty(), event.offset, size)
+                                .map_or_else(|e| -(e as i32), |_| 0)
                         }
                         IOAction::Fsync => fsync(unsafe { BorrowedFd::borrow_raw(event.fd) })
                             .map_or_else(|e| -(e as i32), |_| 0),
