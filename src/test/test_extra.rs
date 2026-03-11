@@ -1,5 +1,5 @@
 use crate::callback_worker::IOWorkers;
-use crate::context::{Driver, IOContext};
+use crate::context::{Driver, setup};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use std::os::fd::AsRawFd;
@@ -15,7 +15,7 @@ fn test_fallocate() {
     let fd = owned_fd.as_raw_fd();
 
     let (tx, rx) = crossfire::mpsc::bounded_blocking(1);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
+    setup::<ClosureCb, _, _>(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
     let (done_tx, done_rx) = unbounded();
 
@@ -43,7 +43,7 @@ fn test_fsync() {
     let fd = owned_fd.as_raw_fd();
 
     let (tx, rx) = crossfire::mpsc::bounded_blocking(1);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
+    setup::<ClosureCb, _, _>(1, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
     let (done_tx, done_rx) = unbounded();
 

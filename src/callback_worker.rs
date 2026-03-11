@@ -9,7 +9,7 @@ pub trait Worker<C: IOCallback>: Send + 'static {
     fn done(&self, event: Box<IOEvent<C>>);
 }
 
-/// Implement with crossfire::mpmc, can be shared among multiple IOContext instances.
+/// Implement with crossfire::mpmc, can be shared among multiple driver instances.
 pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
 
 impl<C: IOCallback> IOWorkers<C> {

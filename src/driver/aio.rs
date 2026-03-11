@@ -2,22 +2,15 @@ use crate::callback_worker::Worker;
 use nix::fcntl::{FallocateFlags, fallocate};
 use nix::unistd::fsync;
 
-use crate::context::CtxShared;
 use crate::tasks::{IOAction, IOCallback, IOEvent};
-use crossfire::{BlockingRxTrait, Rx, Tx, spsc};
+use crossfire::{BlockingRxTrait, Rx, SendError, Tx, spsc};
 use nix::errno::Errno;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::os::fd::RawFd;
 use std::os::unix::io::BorrowedFd;
 use std::{
-    cell::UnsafeCell,
-    io,
-    mem::transmute,
-    os::fd::AsRawFd,
-    sync::{Arc, atomic::Ordering},
-    thread,
-    time::Duration,
+    cell::UnsafeCell, io, mem::transmute, os::fd::AsRawFd, sync::Arc, thread, time::Duration,
 };
 
 pub struct AioSlot<C: IOCallback> {
@@ -72,9 +65,10 @@ impl<C: IOCallback> AioSlot<C> {
 }
 
 struct AioInner<C: IOCallback> {
+    depth: usize,
     context: aio_context_t,
     slots: UnsafeCell<Vec<AioSlot<C>>>,
-    null_file: File, // Moved here
+    null_file: File,
 }
 
 unsafe impl<C: IOCallback> Send for AioInner<C> {}
@@ -90,41 +84,44 @@ impl<
     W: Worker<C> + Send + 'static,
 > AioDriver<C, Q, W>
 {
-    pub fn start(ctx: Arc<CtxShared<C, Q, W>>) -> io::Result<()> {
-        let depth = ctx.depth;
+    pub fn start(depth: usize, rx: Q, cb_workers: W) -> io::Result<()> {
         let mut aio_context: aio_context_t = 0;
         if io_setup(depth as c_long, &mut aio_context) != 0 {
             return Err(io::Error::last_os_error());
         }
-
         let mut slots = Vec::with_capacity(depth);
         for slot_id in 0..depth {
             slots.push(AioSlot::new(slot_id as u64));
         }
-
-        let null_file = File::open("/dev/null")?;
-
-        let inner =
-            Arc::new(AioInner { context: aio_context, slots: UnsafeCell::new(slots), null_file });
+        let null_file;
+        match File::open("/dev/null") {
+            Err(e) => {
+                error!("cannot open /dev/null: {}", e);
+                return Err(e);
+            }
+            Ok(f) => {
+                null_file = f;
+            }
+        }
+        let inner = Arc::new(AioInner {
+            depth,
+            context: aio_context,
+            slots: UnsafeCell::new(slots),
+            null_file,
+        });
 
         let (s_free, r_free) = spsc::bounded_blocking::<u16>(depth);
         for i in 0..depth {
             let _ = s_free.send(i as u16);
         }
-
-        let ctx_submit = ctx.clone();
         let inner_submit = inner.clone();
-        thread::spawn(move || Self::submit_loop(ctx_submit, inner_submit, r_free));
-
-        let ctx_poll = ctx.clone();
-        let inner_poll = inner.clone();
-        thread::spawn(move || Self::poll_loop(ctx_poll, inner_poll, s_free));
-
+        thread::spawn(move || Self::submit_loop(inner_submit, rx, r_free));
+        thread::spawn(move || Self::poll_loop(inner, cb_workers, s_free));
         Ok(())
     }
 
     /// This worker process IOEvent fallocate & fsync
-    fn background_worker(ctx: Arc<CtxShared<C, Q, W>>, rx: Rx<spsc::Array<Box<IOEvent<C>>>>) {
+    fn background_worker(rx: Rx<spsc::Array<Box<IOEvent<C>>>>) {
         loop {
             match rx.recv() {
                 Ok(mut event) => {
@@ -145,7 +142,7 @@ impl<
                     } else {
                         event.set_error(-res);
                     }
-                    ctx.cb_workers.done(event);
+                    event.callback();
                 }
                 Err(_) => {
                     // Channel closed, exit worker
@@ -155,10 +152,8 @@ impl<
         }
     }
 
-    fn submit_loop(
-        ctx: Arc<CtxShared<C, Q, W>>, inner: Arc<AioInner<C>>, free_recv: Rx<spsc::Array<u16>>,
-    ) {
-        let depth = ctx.depth;
+    fn submit_loop(inner: Arc<AioInner<C>>, rx: Q, free_recv: Rx<spsc::Array<u16>>) {
+        let depth = inner.depth;
         let mut iocbs = Vec::<*mut iocb>::with_capacity(depth);
         let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
         let aio_context = inner.context;
@@ -169,20 +164,18 @@ impl<
             // 1. Fetch events
             // Only block if we have no events pending.
             if events_to_process.is_empty() {
-                match ctx.queue.recv() {
+                match rx.recv() {
                     Ok(event) => match event.action {
                         IOAction::Alloc | IOAction::Fsync => {
                             if background_channel_tx.is_none() {
                                 let (tx, rx) = spsc::bounded_blocking::<Box<IOEvent<C>>>(depth);
-                                let ctx_clone = ctx.clone();
-                                thread::spawn(move || Self::background_worker(ctx_clone, rx));
+                                thread::spawn(move || Self::background_worker(rx));
                                 background_channel_tx = Some(tx);
                             }
                             if let Some(tx) = &background_channel_tx {
-                                if let Err(e) = tx.send(event) {
-                                    let mut event_to_err = e.into_inner();
-                                    event_to_err.set_error(Errno::EIO as i32);
-                                    ctx.cb_workers.done(event_to_err);
+                                if let Err(SendError(mut event)) = tx.send(event) {
+                                    event.set_error(Errno::EIO as i32);
+                                    event.callback();
                                 }
                             }
                         }
@@ -198,10 +191,8 @@ impl<
                         slot.fill_exit_slot(slot_id, inner.null_file.as_raw_fd());
                         let mut iocb_ptr: *mut iocb = &mut slot.iocb as *mut _;
 
-                        let _ = ctx.free_slots_count.fetch_sub(1, Ordering::SeqCst);
                         let res = io_submit(aio_context, 1, &mut iocb_ptr);
                         if res != 1 {
-                            let _ = ctx.free_slots_count.fetch_add(1, Ordering::SeqCst);
                             error!("Failed to submit exit signal: {}", res);
                         }
                         info!("io_submit worker exit due to queue closing");
@@ -212,14 +203,13 @@ impl<
 
             // Try to fetch more events up to depth
             while events_to_process.len() < depth {
-                if let Ok(event) = ctx.queue.try_recv() {
+                if let Ok(event) = rx.try_recv() {
                     match event.action {
                         IOAction::Alloc | IOAction::Fsync => {
                             if let Some(tx) = &background_channel_tx {
-                                if let Err(e) = tx.send(event) {
-                                    let mut event_to_err = e.into_inner();
-                                    event_to_err.set_error(Errno::EIO as i32);
-                                    ctx.cb_workers.done(event_to_err);
+                                if let Err(SendError(mut event)) = tx.send(event) {
+                                    event.set_error(Errno::EIO as i32);
+                                    event.callback();
                                 }
                             }
                         }
@@ -255,8 +245,6 @@ impl<
                 let mut left = iocbs.len();
 
                 // Reserve quota
-                let _ = ctx.free_slots_count.fetch_sub(left, Ordering::SeqCst);
-
                 'submit: loop {
                     let result = unsafe {
                         let arr = iocbs.as_mut_ptr().add(done as usize);
@@ -265,7 +253,6 @@ impl<
 
                     if result < 0 {
                         // All remaining failed
-                        let _ = ctx.free_slots_count.fetch_add(left, Ordering::SeqCst);
                         if -result == Errno::EINTR as i64 {
                             continue 'submit;
                         }
@@ -277,9 +264,6 @@ impl<
                             trace!("io submit {} events", result);
                             break 'submit;
                         } else {
-                            let _ = ctx
-                                .free_slots_count
-                                .fetch_add(left - result as usize, Ordering::SeqCst);
                             done += result;
                             left -= result as usize;
                             trace!("io submit {}/{} events", result, left);
@@ -291,10 +275,8 @@ impl<
         }
     }
 
-    fn poll_loop(
-        ctx: Arc<CtxShared<C, Q, W>>, inner: Arc<AioInner<C>>, free_sender: Tx<spsc::Array<u16>>,
-    ) {
-        let depth = ctx.depth;
+    fn poll_loop(inner: Arc<AioInner<C>>, cb_workers: W, free_sender: Tx<spsc::Array<u16>>) {
+        let depth = inner.depth;
         let mut infos = Vec::<io_event>::with_capacity(depth);
         let slots_ref: &mut Vec<AioSlot<C>> = unsafe { transmute(inner.slots.get()) };
         let aio_context = inner.context;
@@ -320,7 +302,6 @@ impl<
             }
 
             assert!(result > 0);
-            let _ = ctx.free_slots_count.fetch_add(result as usize, Ordering::SeqCst);
             unsafe {
                 infos.set_len(result as usize);
             }
@@ -336,27 +317,28 @@ impl<
                     continue;
                 }
 
-                Self::verify_result(&ctx, slot, info);
+                Self::verify_result(&cb_workers, slot, info);
                 let _ = free_sender.send(slot_id as u16);
             }
 
-            if exit_received && ctx.free_slots_count.load(Ordering::SeqCst) == ctx.depth {
+            if exit_received {
                 info!("io_poll worker exit gracefully");
                 break;
             }
         }
         info!("io_poll worker exit cleaning up");
+        // poll_loop() always exit last, after poll_submit()
         let _ = io_destroy(aio_context);
     }
 
     #[inline(always)]
-    fn verify_result(ctx: &CtxShared<C, Q, W>, slot: &mut AioSlot<C>, info: &io_event) {
+    fn verify_result(cb_workers: &W, slot: &mut AioSlot<C>, info: &io_event) {
         if info.res < 0 {
             println!("set error {:?}", info.res);
-            slot.set_error((-info.res) as i32, &ctx.cb_workers);
+            slot.set_error((-info.res) as i32, cb_workers);
             return;
         }
-        slot.set_result(info.res as usize, &ctx.cb_workers);
+        slot.set_result(info.res as usize, cb_workers);
     }
 }
 

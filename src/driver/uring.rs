@@ -1,5 +1,4 @@
 use crate::callback_worker::Worker;
-use crate::context::CtxShared;
 use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::BlockingRxTrait;
 use io_uring::{IoUring, opcode, types::*};
@@ -23,42 +22,37 @@ impl<
     W: Worker<C> + Send + 'static,
 > UringDriver<C, Q, W>
 {
-    pub fn start(ctx: Arc<CtxShared<C, Q, W>>) -> io::Result<()> {
-        let depth = ctx.depth as u32;
-        let ring = IoUring::new(depth.max(2))?;
-        let ring_arc = Arc::new(UringInner(UnsafeCell::new(ring)));
-        let ring_submit = ring_arc.clone();
-        let ring_complete = ring_arc.clone();
+    pub fn start(depth: u32, rx: Q, cb_workers: W) -> io::Result<()> {
+        let ring = IoUring::new(depth.max(8))?;
+        let ctx = Arc::new(UringInner(UnsafeCell::new(ring)));
         let ctx_submit = ctx.clone();
-        let ctx_complete = ctx.clone();
+        let ctx_complete = ctx;
         thread::spawn(move || {
-            Self::submit(ctx_submit, ring_submit);
+            Self::submit(ctx_submit, depth as usize, rx);
         });
         thread::spawn(move || {
-            Self::complete(ctx_complete, ring_complete);
+            Self::complete(ctx_complete, cb_workers);
         });
 
         Ok(())
     }
 
-    fn submit(ctx: Arc<CtxShared<C, Q, W>>, ring_arc: Arc<UringInner>) {
+    fn submit(ctx: Arc<UringInner>, depth: usize, rx: Q) {
         info!("io_uring submitter thread start");
-        let depth = ctx.depth;
         let exit_sent = false;
 
-        let ring = unsafe { &mut *ring_arc.0.get() };
+        let ring = unsafe { &mut *ctx.0.get() };
 
         loop {
             // 1. Receive events
             let mut events = Vec::with_capacity(depth);
 
-            match ctx.queue.recv() {
+            match rx.recv() {
                 Ok(event) => events.push(event),
                 Err(_) => {
                     if !exit_sent {
                         let nop_sqe =
                             opcode::Nop::new().build().user_data(URING_EXIT_SIGNAL_USER_DATA);
-
                         {
                             let mut sq = ring.submission();
                             unsafe {
@@ -75,7 +69,6 @@ impl<
                     break;
                 }
             }
-
             {
                 let sq = ring.submission();
                 if sq.is_full() {
@@ -83,9 +76,8 @@ impl<
                     let _ = ring.submit();
                 }
             }
-
             while events.len() < depth {
-                match ctx.queue.try_recv() {
+                match rx.try_recv() {
                     Ok(event) => events.push(event),
                     Err(_) => break,
                 }
@@ -135,10 +127,10 @@ impl<
         info!("io_uring submitter thread exit");
     }
 
-    fn complete(ctx: Arc<CtxShared<C, Q, W>>, ring_arc: Arc<UringInner>) {
+    fn complete(ctx: Arc<UringInner>, cb_workers: W) {
         info!("io_uring completer thread start");
 
-        let ring = unsafe { &mut *ring_arc.0.get() };
+        let ring = unsafe { &mut *ctx.0.get() };
 
         loop {
             match ring.submit_and_wait(1) {
@@ -164,7 +156,7 @@ impl<
                             } else {
                                 event.set_error(-res);
                             }
-                            ctx.cb_workers.done(event);
+                            cb_workers.done(event);
                         }
                     }
                     if exit_received {

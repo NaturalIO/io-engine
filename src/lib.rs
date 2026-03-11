@@ -6,7 +6,6 @@
 //! ## Architecture
 //!
 //! Key components:
-//! - [IOContext`]: The main driver entry point. Manages submission and completion of IO events.
 //! - [IOEvent](crate::tasks::IOEvent): Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
 //! - [IOCallback](crate::tasks::IOCallback): Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
 //! - [Worker](crate::callback_worker::Worker): Trait for workers handling completions.
@@ -116,7 +115,7 @@
 //!
 //! ```rust
 //! use io_engine::callback_worker::IOWorkers;
-//! use io_engine::{IOContext, Driver};
+//! use io_engine::{setup, Driver};
 //! use io_engine::tasks::{ClosureCb, IOAction, IOEvent};
 //! use io_buffer::Buffer;
 //! use std::fs::OpenOptions;
@@ -137,15 +136,15 @@
 //!     // This channel is used to send events into the engine's submission queue
 //!     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
 //!
-//!     // 3. Create IOContext (io_uring)
+//!     // 3. Setup the driver (io_uring)
 //!     // worker_num=1, depth=16
 //!     // This spawns the necessary driver threads.
-//!     let _ctx = IOContext::<ClosureCb, _, _>::new(
+//!     setup::<ClosureCb, _, _>(
 //!         16,
 //!         rx,
 //!         IOWorkers::new(1),
 //!         Driver::Uring
-//!     ).expect("Failed to create context");
+//!     ).expect("Failed to setup driver");
 //!
 //!     // 4. Submit a Write
 //!     let mut buffer = Buffer::aligned(4096).unwrap();
@@ -189,7 +188,7 @@ extern crate captains_log;
 
 pub mod callback_worker;
 mod context;
-pub use context::{Driver, IOContext};
+pub use context::{Driver, setup};
 mod driver;
 pub mod merge;
 pub mod tasks;

@@ -1,5 +1,5 @@
 use crate::callback_worker::IOWorkers;
-use crate::context::{Driver, IOContext};
+use crate::context::{Driver, setup};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossfire::BlockingTxTrait;
@@ -15,7 +15,7 @@ fn test_read_write_aio() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
+    setup::<ClosureCb, _, _>(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
 
     let (done_tx, done_rx) = unbounded::<(Option<Buffer>, Result<u32, i32>)>();
     let callback = Box::new(move |_offset, buf, res| {
@@ -79,7 +79,7 @@ fn test_fallocate_fsync_aio() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
+    setup::<ClosureCb, _, _>(2, rx, IOWorkers::new(1), Driver::Aio).unwrap();
 
     let (done_tx, done_rx) = unbounded::<(Option<Buffer>, Result<u32, i32>)>();
     let callback = Box::new(move |_offset, buf, res| {
@@ -122,7 +122,7 @@ fn test_fallocate_fsync_uring() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
+    setup::<ClosureCb, _, _>(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
     let (done_tx, done_rx) = unbounded::<(Option<Buffer>, Result<u32, i32>)>();
     let callback = Box::new(move |_offset, buf, res| {
@@ -165,7 +165,7 @@ fn test_read_write_uring() {
     let owned_fd = create_temp_file(temp_file.as_ref());
     let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(2);
-    let _ctx = IOContext::<ClosureCb, _, _>::new(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
+    setup::<ClosureCb, _, _>(2, rx, IOWorkers::new(1), Driver::Uring).unwrap();
 
     let (done_tx, done_rx) = unbounded::<(Option<Buffer>, Result<u32, i32>)>();
     let callback = Box::new(move |_offset, buf, res| {
