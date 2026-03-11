@@ -26,7 +26,12 @@ embed-collections = { version=">=0.5", default-features=false }
 fastrand = "2.3"
 md5 = "0"
 io-buffer = { version="1", features = ["rand"]}
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = []
 compress = []
+
+[[bench]]
+name = "channel_bench"
+harness = false
