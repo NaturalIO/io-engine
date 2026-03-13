@@ -1,20 +1,15 @@
 use crate::callback_worker::Worker;
 use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::BlockingRxTrait;
-use io_uring::{IoUring, opcode, types::*};
+use io_uring::{IoUring, opcode, squeue::Flags, types::*};
 use log::{error, info};
-use std::{cell::UnsafeCell, io, marker::PhantomData, sync::Arc, thread, time::Duration};
+use std::{collections::VecDeque, io, marker::PhantomData, sync::Arc, thread, time::Duration};
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
 pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
     _marker: PhantomData<(C, Q, W)>,
 }
-
-struct UringInner(UnsafeCell<IoUring>);
-
-unsafe impl Send for UringInner {}
-unsafe impl Sync for UringInner {}
 
 impl<
     C: IOCallback,
@@ -23,71 +18,41 @@ impl<
 > UringDriver<C, Q, W>
 {
     pub fn start(depth: u32, rx: Q, cb_workers: W) -> io::Result<()> {
-        let ring = IoUring::new(depth.max(8))?;
-        let ctx = Arc::new(UringInner(UnsafeCell::new(ring)));
-        let ctx_submit = ctx.clone();
-        let ctx_complete = ctx;
+        let ctx = Arc::new(IoUring::new(depth.max(8))?);
+        let _ctx = ctx.clone();
         thread::spawn(move || {
-            Self::submit(ctx_submit, depth as usize, rx);
+            Self::submit(_ctx, depth as usize, rx);
         });
         thread::spawn(move || {
-            Self::complete(ctx_complete, cb_workers);
+            Self::complete(ctx, cb_workers);
         });
 
         Ok(())
     }
 
-    fn submit(ctx: Arc<UringInner>, depth: usize, rx: Q) {
+    fn submit(ring: Arc<IoUring>, depth: usize, rx: Q) {
         info!("io_uring submitter thread start");
-        let exit_sent = false;
-
-        let ring = unsafe { &mut *ctx.0.get() };
-
+        macro_rules! get_sq {
+            () => {{ unsafe { ring.submission_shared() } }};
+        }
+        let mut events = VecDeque::with_capacity(depth);
         loop {
-            // 1. Receive events
-            let mut events = Vec::with_capacity(depth);
-
             match rx.recv() {
-                Ok(event) => events.push(event),
+                Ok(event) => events.push_back(event),
                 Err(_) => {
-                    if !exit_sent {
-                        let nop_sqe =
-                            opcode::Nop::new().build().user_data(URING_EXIT_SIGNAL_USER_DATA);
-                        {
-                            let mut sq = ring.submission();
-                            unsafe {
-                                if sq.push(&nop_sqe).is_err() {
-                                    drop(sq);
-                                    let _ = ring.submit();
-                                    let mut sq = ring.submission();
-                                    let _ = sq.push(&nop_sqe);
-                                }
-                            }
-                        }
-                        info!("io_uring submitter sent exit signal");
-                    }
                     break;
-                }
-            }
-            {
-                let sq = ring.submission();
-                if sq.is_full() {
-                    drop(sq);
-                    let _ = ring.submit();
                 }
             }
             while events.len() < depth {
                 match rx.try_recv() {
-                    Ok(event) => events.push(event),
+                    Ok(event) => events.push_back(event),
                     Err(_) => break,
                 }
             }
-
-            // 2. Push to SQ
             if !events.is_empty() {
                 {
-                    let mut sq = ring.submission();
-                    for mut event in events.drain(0..) {
+                    let mut sq = get_sq!();
+                    while let Some(mut event) = events.pop_front() {
                         let fd = event.fd;
 
                         let sqe = match event.action {
@@ -112,32 +77,58 @@ impl<
                         let sqe = sqe.user_data(user_data);
                         unsafe {
                             if let Err(_) = sq.push(&sqe) {
-                                error!("SQ full (should not happen)");
-                                let _ = Box::from_raw(user_data as *mut IOEvent<C>);
+                                debug!("sq is full");
+                                let _event = Box::from_raw(user_data as *mut IOEvent<C>);
+                                events.push_front(_event);
+                                // TODO squeue_wait
+                                // TODO we should write one function to combine submit and squeue_wait
                             }
                         }
                     }
                 }
-
                 if let Err(e) = ring.submit() {
                     error!("io_uring submit error: {:?}", e);
                 }
             }
         }
-        info!("io_uring submitter thread exit");
+
+        // use IO_DRAIN to make sure this event is the last to finish
+        let nop_sqe = opcode::Nop::new()
+            .build()
+            .user_data(URING_EXIT_SIGNAL_USER_DATA)
+            .flags(Flags::IO_DRAIN);
+        {
+            {
+                let mut sq = get_sq!();
+                if unsafe { sq.push(&nop_sqe) }.is_ok() {
+                    drop(sq);
+                    let _ = ring.submit();
+                    info!("io_uring submitter sent exit signal");
+                    return;
+                }
+            }
+            // TODO we should write one function to combine submit and squeue_wait
+            ring.submitter().squeue_wait().expect("wait");
+
+            {
+                let mut sq = get_sq!();
+                unsafe { sq.push(&nop_sqe).expect("push") };
+                drop(sq);
+                let _ = ring.submit();
+            }
+        }
+        info!("io_uring submitter sent exit signal");
     }
 
-    fn complete(ctx: Arc<UringInner>, cb_workers: W) {
+    fn complete(ring: Arc<IoUring>, cb_workers: W) {
         info!("io_uring completer thread start");
-
-        let ring = unsafe { &mut *ctx.0.get() };
 
         loop {
             match ring.submit_and_wait(1) {
                 Ok(_) => {
                     let mut exit_received = false;
                     {
-                        let mut cq = ring.completion();
+                        let mut cq = unsafe { ring.completion_shared() };
                         cq.sync();
                         for cqe in cq {
                             let user_data = cqe.user_data();
