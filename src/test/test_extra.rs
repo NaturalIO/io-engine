@@ -28,9 +28,7 @@ fn test_fallocate() {
     let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, 4096);
     event.set_callback(cb);
     tx.send(Box::new(event)).unwrap();
-
-    // Wait for completion
-    done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(done_rx.recv().unwrap().is_ok());
 
     let metadata = std::fs::metadata(temp_file.as_ref()).unwrap();
     assert_eq!(metadata.size(), 4096);
@@ -58,5 +56,5 @@ fn test_fsync() {
     tx.send(Box::new(event)).unwrap();
 
     // Wait for completion
-    done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(done_rx.recv().expect("done").is_ok());
 }

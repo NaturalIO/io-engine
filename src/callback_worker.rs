@@ -24,7 +24,7 @@ impl<C: IOCallback> IOWorkers<C> {
             std::thread::spawn(move || {
                 loop {
                     match _rx.recv() {
-                        Ok(event) => event.callback_unchecked(false),
+                        Ok(event) => event.callback_unchecked(true),
                         Err(_) => {
                             debug!("IOWorkers exit");
                             return;
@@ -81,6 +81,6 @@ pub struct Inline;
 
 impl<C: IOCallback> Worker<C> for Inline {
     fn done(&self, event: Box<IOEvent<C>>) {
-        event.callback_unchecked(false);
+        event.callback_unchecked(true);
     }
 }
