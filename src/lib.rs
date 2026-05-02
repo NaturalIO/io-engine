@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use io_engine::tasks::{IOCallback, IOEvent};
-//! use nix::errno::Errno;
+//! use rustix::io::Errno;
 //!
 //! struct MyCallback {
 //!     id: u64,

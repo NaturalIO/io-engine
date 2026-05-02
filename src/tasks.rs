@@ -3,7 +3,7 @@ use std::{fmt, u64};
 
 use embed_collections::SegList;
 use io_buffer::{Buffer, safe_copy};
-use nix::errno::Errno;
+use rustix::io::Errno;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[repr(u8)]
@@ -182,7 +182,7 @@ impl<C: IOCallback> IOEvent<C> {
         } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
-            return Err(Errno::from_raw(-res));
+            return Err(Errno::from_raw_os_error(-res));
         }
     }
 
@@ -196,7 +196,7 @@ impl<C: IOCallback> IOEvent<C> {
         } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
-            return Err(Errno::from_raw(-res));
+            return Err(Errno::from_raw_os_error(-res));
         }
     }
 
@@ -217,7 +217,7 @@ impl<C: IOCallback> IOEvent<C> {
         } else if res == i32::MIN {
             panic!("IOEvent get_result before it's done");
         } else {
-            return Err(Errno::from_raw(-res));
+            return Err(Errno::from_raw_os_error(-res));
         }
     }
 
@@ -226,7 +226,7 @@ impl<C: IOCallback> IOEvent<C> {
         if errno == 0 {
             // XXX: EOF does not have code to represent,
             // also when offset is not align to 4096, may return result 0,
-            errno = Errno::EINVAL as i32;
+            errno = Errno::INVAL.raw_os_error();
         }
         if errno > 0 {
             errno = -errno;
@@ -306,7 +306,7 @@ impl<C: IOCallback> IOEvent<C> {
                         BufOrLen::Len(_) => Ok(None),
                     }
                 } else {
-                    Err(Errno::from_raw(-self.res))
+                    Err(Errno::from_raw_os_error(-self.res))
                 };
                 cb.call(self.offset, res);
             }
@@ -349,7 +349,7 @@ impl<C: IOCallback> IOEvent<C> {
                     for IOEventMerged { buf, cb } in sub_tasks {
                         let _l = buf.len() as i64;
                         if let Some(_cb) = cb {
-                            _cb.call(offset, Err(Errno::from_raw(-self.res)));
+                            _cb.call(offset, Err(Errno::from_raw_os_error(-self.res)));
                         }
                         offset += _l;
                     }
@@ -364,7 +364,7 @@ mod tests {
 
     use super::*;
     use io_buffer::Buffer;
-    use nix::errno::Errno;
+    use rustix::io::Errno;
     use std::mem::size_of;
     use std::sync::Arc;
 
@@ -515,7 +515,7 @@ mod tests {
     fn test_callback_merged_error() {
         let parent_buf = Buffer::alloc(4096).unwrap();
         let mut event = IOEvent::<ClosureCb>::new(0, parent_buf, IOAction::Read, 3000);
-        event.set_error(Errno::EIO as i32); // IO error
+        event.set_error(Errno::IO.raw_os_error()); // IO error
 
         let mut sub_tasks = SegList::new();
 
@@ -525,7 +525,7 @@ mod tests {
             cb: Some(ClosureCb(Box::new(move |offset, res| {
                 assert_eq!(offset, 3000, "error callback offset");
                 assert!(res.is_err());
-                assert_eq!(res.err().unwrap(), Errno::EIO);
+                assert_eq!(res.err().unwrap(), Errno::IO);
             }))),
         });
 

@@ -4,7 +4,7 @@ use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
 use crossfire::BlockingTxTrait;
 use io_buffer::{Buffer, rand_buffer};
-use nix::errno::Errno;
+use rustix::io::Errno;
 use std::os::fd::AsRawFd;
 use std::sync::mpsc::channel as unbounded;
 extern crate md5;

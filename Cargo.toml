@@ -13,7 +13,7 @@ Library for block-based IO, intend to mask AIO/io_uring underneath.
 
 [dependencies]
 libc = "0"
-nix = { version = "0", features = ["fs"] }
+rustix = { version = "1", features=["fs"]}
 io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"

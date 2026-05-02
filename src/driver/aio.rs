@@ -1,10 +1,9 @@
 use crate::callback_worker::Worker;
-use nix::fcntl::{FallocateFlags, fallocate};
-use nix::unistd::fsync;
+use rustix::fs::{FallocateFlags, fallocate, fsync};
 
 use crate::tasks::{IOAction, IOCallback, IOEvent};
 use crossfire::{BlockingRxTrait, Rx, SendError, Tx, spsc};
-use nix::errno::Errno;
+use rustix::io::Errno;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::os::fd::RawFd;
@@ -125,22 +124,20 @@ impl<
         loop {
             match rx.recv() {
                 Ok(mut event) => {
-                    let size = event.get_size() as i64;
-                    let res = match event.action {
+                    let mut size: usize = 0;
+                    let fd = unsafe { BorrowedFd::borrow_raw(event.fd) };
+                    let res: Result<(), Errno> = match event.action {
                         IOAction::Alloc => {
-                            let fd = unsafe { BorrowedFd::borrow_raw(event.fd) };
-                            fallocate(fd, FallocateFlags::empty(), event.offset, size)
-                                .map_or_else(|e| -(e as i32), |_| 0)
+                            size = event.get_size() as usize;
+                            fallocate(fd, FallocateFlags::empty(), event.offset as u64, size as u64)
                         }
-                        IOAction::Fsync => fsync(unsafe { BorrowedFd::borrow_raw(event.fd) })
-                            .map_or_else(|e| -(e as i32), |_| 0),
-                        _ => -libc::EINVAL, // Should not happen
+                        IOAction::Fsync => fsync(fd),
+                        _ => Err(Errno::INVAL), // Should not happen
                     };
-
-                    if res == 0 {
-                        event.set_copied(size as usize);
+                    if let Err(e) = res {
+                        event.set_error(e.raw_os_error());
                     } else {
-                        event.set_error(-res);
+                        event.set_copied(size);
                     }
                     event.callback_unchecked(true);
                 }
@@ -174,7 +171,7 @@ impl<
                             }
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
-                                    event.set_error(Errno::ESHUTDOWN as i32);
+                                    event.set_error(Errno::SHUTDOWN.raw_os_error());
                                     event.callback_unchecked(true);
                                 }
                             }
@@ -208,7 +205,7 @@ impl<
                         IOAction::Alloc | IOAction::Fsync => {
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
-                                    event.set_error(Errno::ESHUTDOWN as i32);
+                                    event.set_error(Errno::SHUTDOWN.raw_os_error());
                                     event.callback_unchecked(true);
                                 }
                             }
@@ -253,7 +250,7 @@ impl<
 
                     if result < 0 {
                         // All remaining failed
-                        if -result == Errno::EINTR as i64 {
+                        if -result == Errno::INTR.raw_os_error() as i64 {
                             continue 'submit;
                         }
                         error!("io_submit error: {}", result);
@@ -293,7 +290,7 @@ impl<
             );
 
             if result < 0 {
-                if -result == Errno::EINTR as i64 {
+                if -result == Errno::INTR.raw_os_error() as i64 {
                     continue;
                 }
                 error!("io_getevents errno: {}", -result);

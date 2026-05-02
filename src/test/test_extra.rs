@@ -2,11 +2,10 @@ use crate::callback_worker::IOWorkers;
 use crate::context::{Driver, setup};
 use crate::tasks::{ClosureCb, IOAction, IOEvent};
 use crate::test::*;
-use nix::errno::Errno;
+use rustix::io::Errno;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::sync::mpsc::channel as unbounded;
-use std::time::Duration;
 
 #[test]
 fn test_fallocate() {

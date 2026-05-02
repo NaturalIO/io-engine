@@ -36,8 +36,7 @@ use crate::tasks::{IOAction, IOCallback, IOEvent, IOEventMerged};
 use crossfire::BlockingTxTrait;
 use embed_collections::SegList;
 use io_buffer::Buffer;
-use nix::errno::Errno;
-use std::io;
+use rustix::io::Errno;
 use std::os::fd::RawFd;
 
 /// Info about the first event and merged state.
@@ -190,7 +189,7 @@ impl<C: IOCallback> MergeBuffer<C> {
                 // Allocation failed: error out all events
                 for merged in sub_tasks.drain() {
                     if let Some(cb) = merged.cb {
-                        cb.call(offset, Err(Errno::ENOMEM));
+                        cb.call(offset, Err(Errno::NOMEM));
                     }
                 }
                 None
@@ -205,7 +204,7 @@ impl<C: IOCallback> MergeBuffer<C> {
     /// - If there is a single event, it returns `Some(event)` with the original event.
     /// - If there are multiple events, it attempts to merge them:
     ///   - If successful, reuses the first `Box<IOEvent>` as the master event, replacing its buffer.
-    ///   - If buffer allocation for the merged event fails, all original events are marked with an `ENOMEM` error and their callbacks are triggered, then `None` is returned.
+    ///   - If buffer allocation for the merged event fails, all original events are marked with an `NOMEM` error and their callbacks are triggered, then `None` is returned.
     /// - This function will always override fd in IOEvent with argument
     ///
     /// After flushing, the buffer is reset.
@@ -260,16 +259,17 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// * `event` - The [`IOEvent`] to add.
     ///
     /// # Returns
-    /// An `Ok(())` on success, or an `io::Error` if flushing fails.
+    /// An `Ok(())` on success.
+    /// When submit sender closed, set Errno::SHUTDOWN on `event` and return the same Errno
     /// On debug mode, will validate event.fd and event.action.
-    pub fn add_event(&mut self, mut event: IOEvent<C>) -> Result<(), io::Error> {
+    pub fn add_event(&mut self, mut event: IOEvent<C>) -> Result<(), Errno> {
         log_debug_assert_eq!(self.fd, event.fd);
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
 
         if event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event) {
             if let Err(e) = self._flush() {
-                event.set_error(Errno::ESHUTDOWN as i32);
+                event.set_error(Errno::SHUTDOWN.raw_os_error());
                 event.callback_unchecked(false);
                 return Err(e);
             }
@@ -283,18 +283,16 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// Explicitly flushes any pending buffered events to the IO driver.
     ///
     /// # Returns
-    /// An `Ok(())` on success, or an `io::Error` if sending the flushed event fails.
-    pub fn flush(&mut self) -> Result<(), io::Error> {
+    /// An `Ok(())` on success, or an `rustix::Errno` when sending the submit tx closed.
+    pub fn flush(&mut self) -> Result<(), Errno> {
         self._flush()
     }
 
     #[inline(always)]
-    fn _flush(&mut self) -> Result<(), io::Error> {
+    fn _flush(&mut self) -> Result<(), Errno> {
         if let Some(event) = self.buffer.flush(self.fd, self.action) {
             trace!("mio: submit event from flush {:?}", event);
-            self.sender
-                .send(Box::new(event))
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Queue closed"))?;
+            self.sender.send(Box::new(event)).map_err(|_| Errno::SHUTDOWN)?;
         }
         Ok(())
     }
