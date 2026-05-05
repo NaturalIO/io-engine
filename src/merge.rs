@@ -270,7 +270,7 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
         if event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event) {
             if let Err(e) = self._flush() {
                 event.set_error(Errno::SHUTDOWN.raw_os_error());
-                event.callback_unchecked(false);
+                event._callback_unchecked(false);
                 return Err(e);
             }
         }

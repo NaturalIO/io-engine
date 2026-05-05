@@ -261,23 +261,34 @@ impl<C: IOCallback> IOEvent<C> {
     {
         if self.res >= 0 {
             if let BufOrLen::Buffer(buf) = &mut self.buf_or_len {
-                if buf.len() > self.res as usize {
+                if buf.len() == self.res as usize {
+                    // most frequent case in the front, for cpu branch prediction
+                    self._callback_unchecked(false);
+                } else {
                     if self.action == IOAction::Read {
                         if check_short_read(self.offset as u64 + self.res as u64) {
                             return Err(self);
                         } else {
                             // reach file ending
                             buf.set_len(self.res as usize);
+                            self._callback_unchecked(false);
                         }
                     } else {
                         // short write always need to resubmit
                         return Err(self);
                     }
                 }
+            } else {
+                self._callback_unchecked(false);
             }
         }
-        self.callback_unchecked(false);
         Ok(())
+    }
+
+    /// Perform callback on the IOEvent when cannot re-submit for short i/o
+    #[inline(always)]
+    pub fn callback_unchecked(self) {
+        self._callback_unchecked(true);
     }
 
     /// Perform callback on the IOEvent when cannot re-submit for short i/o
@@ -291,7 +302,7 @@ impl<C: IOCallback> IOEvent<C> {
     /// Only for callback worker does not re-submit when short I/O.
     /// Buffer::len() will changed to actual I/O copied size during callback.
     #[inline(always)]
-    pub fn callback_unchecked(mut self, to_fix_short_io: bool) {
+    pub(crate) fn _callback_unchecked(mut self, to_fix_short_io: bool) {
         match std::mem::replace(&mut self.cb, TaskCallback::None) {
             TaskCallback::None => {}
             TaskCallback::Callback(cb) => {
@@ -389,7 +400,7 @@ mod tests {
         })));
 
         event.set_copied(4096);
-        event.callback_unchecked(true);
+        event.callback_unchecked();
 
         let (offset, res) = result.lock().unwrap().take().unwrap();
         assert_eq!(offset, 1024);
@@ -457,7 +468,7 @@ mod tests {
         parent_buf.copy_from(0, b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()");
 
         event.set_merged_tasks(parent_buf, sub_tasks);
-        event.callback_unchecked(true); // Should invoke all callbacks
+        event.callback_unchecked(); // Should invoke all callbacks
 
         // Verify offsets
         assert_eq!(offsets[0].load(Ordering::SeqCst), 1000);
@@ -507,7 +518,7 @@ mod tests {
         });
 
         event.set_merged_tasks(Buffer::alloc(4096).unwrap(), sub_tasks);
-        event.callback_unchecked(true); // Should invoke all callbacks with correct offsets
+        event.callback_unchecked(); // Should invoke all callbacks with correct offsets
     }
 
     /// Test merged callback with error result
@@ -539,7 +550,7 @@ mod tests {
         });
 
         event.set_merged_tasks(Buffer::alloc(48).unwrap(), sub_tasks);
-        event.callback_unchecked(true);
+        event.callback_unchecked();
     }
 
     /// Test short read in merged callback
@@ -585,7 +596,7 @@ mod tests {
         };
 
         event.set_merged_tasks(parent_buf, sub_tasks);
-        event.callback_unchecked(true);
+        event.callback_unchecked();
 
         // Verify
         assert_eq!(offsets[0].load(Ordering::SeqCst), 4000);

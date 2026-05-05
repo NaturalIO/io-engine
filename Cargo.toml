@@ -18,7 +18,7 @@ io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"
 io-buffer = { version="1"}
-crossfire = "3.1"
+crossfire = ">=3.1.9"
 io-uring = "0.7"
 embed-collections = { version=">=0.5", default-features=false }
 

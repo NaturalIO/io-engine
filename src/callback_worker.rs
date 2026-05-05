@@ -13,7 +13,7 @@ pub trait Worker<C: IOCallback>: Send + 'static {
 ///
 /// # Safety
 ///
-/// It does not check and resubmit short I/O
+/// It does not resubmit short I/O
 pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
 
 impl<C: IOCallback> IOWorkers<C> {
@@ -24,7 +24,7 @@ impl<C: IOCallback> IOWorkers<C> {
             std::thread::spawn(move || {
                 loop {
                     match _rx.recv() {
-                        Ok(event) => event.callback_unchecked(true),
+                        Ok(event) => event.callback_unchecked(),
                         Err(_) => {
                             debug!("IOWorkers exit");
                             return;
@@ -76,11 +76,11 @@ where
 ///
 /// # Safety
 ///
-/// It does not check and resubmit short I/O
+/// It does not resubmit short I/O
 pub struct Inline;
 
 impl<C: IOCallback> Worker<C> for Inline {
     fn done(&self, event: Box<IOEvent<C>>) {
-        event.callback_unchecked(true);
+        event.callback_unchecked();
     }
 }

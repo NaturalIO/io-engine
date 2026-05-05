@@ -139,7 +139,7 @@ impl<
                     } else {
                         event.set_copied(size);
                     }
-                    event.callback_unchecked(true);
+                    event._callback_unchecked(false);
                 }
                 Err(_) => {
                     // Channel closed, exit worker
@@ -172,7 +172,7 @@ impl<
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
                                     event.set_error(Errno::SHUTDOWN.raw_os_error());
-                                    event.callback_unchecked(true);
+                                    event.callback_unchecked();
                                 }
                             }
                         }
@@ -206,7 +206,7 @@ impl<
                             if let Some(tx) = &background_channel_tx {
                                 if let Err(SendError(mut event)) = tx.send(event) {
                                     event.set_error(Errno::SHUTDOWN.raw_os_error());
-                                    event.callback_unchecked(true);
+                                    event.callback_unchecked();
                                 }
                             }
                         }

@@ -66,9 +66,10 @@
 //!
 //! ```rust,ignore
 //! // In your callback worker thread
+//! let (queue_tx, queue_rx) = mpsc::bounded_blocking(1000);
 //! loop {
-//!     match rx.recv() {
-//!         Ok(event) => event.callback_unchecked(true),
+//!     match queue_rx.recv() {
+//!         Ok(event) => event.callback_unchecked(),
 //!         Err(_) => break,
 //!     }
 //! }
@@ -81,15 +82,22 @@
 //! that requires retry:
 //!
 //! ```rust,ignore
-//! // check_short_read returns true if offset exceeds file end
-//! event.callback(|offset| {
-//!         // NOTE: you should probably use weak reference here
-//!         offset < file_size
-//!     })
-//!     .unwrap_or_else(|event| {
+//! use crossfire::WeakTx;
+//! let (queue_tx, queue_rx) = mpsc::bounded_blocking::<Box<IOEvent<_>>>(1000);
+//! let weak_tx: WeakTx<_> = queue_tx.downgrade();
+//! // use a weak reference of sender to allow the main sender can be drop.
+//! // io-engine rely on error of receiver to notify exit.
+//! while let Ok() = queue_rx.recv() {
+//!     // check_short_read returns true if offset exceeds file end
+//!     if let Err(event_retry) = event.callback(|offset|  offset < file_size ) {
 //!         // Short I/O detected, resubmit the event
-//!         queue_tx.send(event).unwrap();
-//!     });
+//!         if let Some(tx) = weak_tx.upgrade::<MTx<_>>() {
+//!             tx.send(event_retry).unwrap();
+//!         } else {
+//!             event_retry.callback_unchecked();
+//!         }
+//!     };
+//! }
 //! ```
 //!
 //! The closure receives the current offset and should return `true` if the offset
