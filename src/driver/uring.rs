@@ -1,5 +1,5 @@
 use crate::callback_worker::Worker;
-use crate::tasks::{IOAction, IOCallback, IOEvent};
+use crate::tasks::{CbArgs, IOAction, IOEvent};
 use crossfire::BlockingRxTrait;
 use io_uring::{IoUring, opcode, squeue::Flags, types::*};
 use log::{error, info};
@@ -7,15 +7,12 @@ use std::{collections::VecDeque, io, marker::PhantomData, sync::Arc, thread, tim
 
 const URING_EXIT_SIGNAL_USER_DATA: u64 = u64::MAX;
 
-pub struct UringDriver<C: IOCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
+pub struct UringDriver<C: CbArgs, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
     _marker: PhantomData<(C, Q, W)>,
 }
 
-impl<
-    C: IOCallback,
-    Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
-    W: Worker<C> + Send + 'static,
-> UringDriver<C, Q, W>
+impl<C: CbArgs, Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static, W: Worker<C> + Send + 'static>
+    UringDriver<C, Q, W>
 {
     pub fn start(depth: u32, rx: Q, cb_workers: W) -> io::Result<()> {
         let ctx = Arc::new(IoUring::new(depth.max(8))?);
@@ -76,7 +73,7 @@ impl<
                         let user_data = Box::into_raw(event) as u64;
                         let sqe = sqe.user_data(user_data);
                         unsafe {
-                            if let Err(_) = sq.push(&sqe) {
+                            if sq.push(&sqe).is_err() {
                                 debug!("sq is full");
                                 let _event = Box::from_raw(user_data as *mut IOEvent<C>);
                                 events.push_front(_event);

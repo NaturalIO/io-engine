@@ -32,15 +32,15 @@
 //! - [`MergeBuffer`]: Internal buffer logic.
 //! - [`MergeSubmitter`]: Wraps a sender channel and manages the merge logic before sending.
 
-use crate::tasks::{IOAction, IOCallback, IOEvent, IOEventMerged};
-use crossfire::BlockingTxTrait;
+use crate::tasks::{CbArgs, IOAction, IOEvent, IOEventMerged};
+use crossfire::{BlockingTxTrait, SendError};
 use embed_collections::SegList;
 use io_buffer::Buffer;
 use rustix::io::Errno;
 use std::os::fd::RawFd;
 
 /// Info about the first event and merged state.
-struct MergedInfo<C: IOCallback> {
+struct MergedInfo<C: CbArgs> {
     /// First event stored as Box<IOEvent> to allow reuse when merging.
     first_event: Box<IOEvent<C>>,
     /// Tail offset: next contiguous address that can be merged.
@@ -54,14 +54,14 @@ struct MergedInfo<C: IOCallback> {
 /// This internal component collects [`IOEvent`]s,
 /// presuming the same IO action and file descriptor (it does not check),
 /// the merge upper bound is specified in `merge_size_limit`.
-pub struct MergeBuffer<C: IOCallback> {
+pub struct MergeBuffer<C: CbArgs> {
     pub merge_size_limit: usize,
     merged_info: Option<MergedInfo<C>>,
     /// Subsequent events stored as IOEventMerged for cache-friendly storage.
     merged_events: SegList<IOEventMerged<C>>,
 }
 
-impl<C: IOCallback> MergeBuffer<C> {
+impl<C: CbArgs> MergeBuffer<C> {
     /// Creates a new `MergeBuffer` with the specified merge size limit.
     ///
     /// # Arguments
@@ -168,8 +168,6 @@ impl<C: IOCallback> MergeBuffer<C> {
         let sub_tasks = std::mem::replace(&mut self.merged_events, SegList::new());
         debug_assert!(sub_tasks.len() > 1);
         let size = info.total_size;
-        let offset = info.first_event.offset;
-
         match Buffer::aligned(size as i32) {
             Ok(mut buffer) => {
                 if action == IOAction::Write {
@@ -188,8 +186,8 @@ impl<C: IOCallback> MergeBuffer<C> {
             Err(_) => {
                 // Allocation failed: error out all events
                 for merged in sub_tasks.drain() {
-                    if let Some(cb) = merged.cb {
-                        cb.call(offset, Err(Errno::NOMEM));
+                    if let Some(args) = merged.args {
+                        args.set_merge_error(Errno::NOMEM);
                     }
                 }
                 None
@@ -229,14 +227,14 @@ impl<C: IOCallback> MergeBuffer<C> {
 /// This component buffers incoming [`IOEvent`]s into a [`MergeBuffer`].
 /// It ensures that events for the same file descriptor and IO action are
 /// considered for merging to optimize system calls.
-pub struct MergeSubmitter<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> {
+pub struct MergeSubmitter<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> {
     fd: RawFd,
     buffer: MergeBuffer<C>,
     sender: S,
     action: IOAction,
 }
 
-impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
+impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// Creates a new `MergeSubmitter`.
     ///
     /// # Arguments
@@ -267,12 +265,14 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
 
-        if event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event) {
-            if let Err(e) = self._flush() {
-                event.set_error(Errno::SHUTDOWN.raw_os_error());
-                event._callback_unchecked(false);
-                return Err(e);
-            }
+        if (event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event))
+            && let Err(e) = self._flush()
+        {
+            event.set_errno(e);
+            event._callback_unchecked(false, |args: C, _offset: i64, _res| {
+                args.set_merge_error(e);
+            });
+            return Err(e);
         }
         if self.buffer.push_event(event) {
             self._flush()?;
@@ -292,7 +292,14 @@ impl<C: IOCallback, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     fn _flush(&mut self) -> Result<(), Errno> {
         if let Some(event) = self.buffer.flush(self.fd, self.action) {
             trace!("mio: submit event from flush {:?}", event);
-            self.sender.send(Box::new(event)).map_err(|_| Errno::SHUTDOWN)?;
+            if let Err(SendError(mut fail_event)) = self.sender.send(Box::new(event)) {
+                let e = Errno::SHUTDOWN;
+                fail_event.set_errno(e);
+                fail_event._callback_unchecked(false, |args: C, _offset: i64, _res| {
+                    args.set_merge_error(e);
+                });
+                return Err(e);
+            }
         }
         Ok(())
     }

@@ -1,59 +1,21 @@
-use crate::tasks::{IOCallback, IOEvent};
-use crossfire::{MTx, Tx, flavor::Flavor, mpmc};
+use crate::tasks::{CbArgs, IOEvent};
+use crossfire::{MTx, Tx, flavor::Flavor};
+use io_buffer::Buffer;
+use rustix::io::Errno;
 
 /// A trait for workers that accept IO events.
 ///
 /// This allows using either `IOWorkers` (wrappers around channels) or direct channels
 /// (`MTx`, `Tx`) or any other sink, or even process inline.
-pub trait Worker<C: IOCallback>: Send + 'static {
+pub trait Worker<C: CbArgs>: Send + 'static {
     fn done(&self, event: Box<IOEvent<C>>);
-}
-
-/// Example callback worker implement with crossfire::mpmc, can be shared among multiple driver instances.
-///
-/// # Safety
-///
-/// It does not resubmit short I/O
-pub struct IOWorkers<C: IOCallback>(pub(crate) MTx<mpmc::Array<Box<IOEvent<C>>>>);
-
-impl<C: IOCallback> IOWorkers<C> {
-    pub fn new(workers: usize) -> Self {
-        let (tx, rx) = mpmc::bounded_blocking::<Box<IOEvent<C>>>(100000);
-        for _i in 0..workers {
-            let _rx = rx.clone();
-            std::thread::spawn(move || {
-                loop {
-                    match _rx.recv() {
-                        Ok(event) => event.callback_unchecked(),
-                        Err(_) => {
-                            debug!("IOWorkers exit");
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-        Self(tx)
-    }
-}
-
-impl<C: IOCallback> Clone for IOWorkers<C> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<C: IOCallback> Worker<C> for IOWorkers<C> {
-    fn done(&self, item: Box<IOEvent<C>>) {
-        let _ = self.0.send(item);
-    }
 }
 
 // Implement Worker for Crossfire MTx (Multi-Producer)
 impl<C, F> Worker<C> for MTx<F>
 where
     F: Flavor<Item = Box<IOEvent<C>>>,
-    C: IOCallback,
+    C: CbArgs,
 {
     fn done(&self, item: Box<IOEvent<C>>) {
         let _ = self.send(item);
@@ -64,7 +26,7 @@ where
 impl<C, F> Worker<C> for Tx<F>
 where
     F: Flavor<Item = Box<IOEvent<C>>>,
-    C: IOCallback,
+    C: CbArgs,
 {
     fn done(&self, item: Box<IOEvent<C>>) {
         let _ = self.send(item);
@@ -77,10 +39,10 @@ where
 /// # Safety
 ///
 /// It does not resubmit short I/O
-pub struct Inline;
+pub struct InlineClosure<C: CbArgs>(pub Box<dyn Fn(C, i64, Result<Option<Buffer>, Errno>) + Send>);
 
-impl<C: IOCallback> Worker<C> for Inline {
+impl<C: CbArgs> Worker<C> for InlineClosure<C> {
     fn done(&self, event: Box<IOEvent<C>>) {
-        event.callback_unchecked();
+        event.callback_unchecked(&self.0);
     }
 }

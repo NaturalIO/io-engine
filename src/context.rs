@@ -1,7 +1,7 @@
 use crate::callback_worker::Worker;
-use crate::driver::aio::AioDriver;
+//use crate::driver::aio::AioDriver;
 use crate::driver::uring::UringDriver; // Import UringDriver
-use crate::tasks::{IOCallback, IOEvent};
+use crate::tasks::{CbArgs, IOEvent};
 use crossfire::BlockingRxTrait;
 use std::io;
 
@@ -36,12 +36,13 @@ pub fn setup<C, Q, W>(
     driver_type: Driver, // New parameter
 ) -> io::Result<()>
 where
-    C: IOCallback,
+    C: CbArgs,
     Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
     W: Worker<C> + Send + 'static,
 {
     match driver_type {
-        Driver::Aio => AioDriver::<C, Q, W>::start(depth, rx, cb_workers),
         Driver::Uring => UringDriver::<C, Q, W>::start(depth as u32, rx, cb_workers),
+        _ => unreachable!(),
+        //        Driver::Aio => AioDriver::<C, Q, W>::start(depth, rx, cb_workers),
     }
 }

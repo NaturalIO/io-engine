@@ -1,7 +1,7 @@
 use crate::callback_worker::Worker;
 use rustix::fs::{FallocateFlags, fallocate, fsync};
 
-use crate::tasks::{IOAction, IOCallback, IOEvent};
+use crate::tasks::{IOAction, CbArgs, IOEvent};
 use crossfire::{BlockingRxTrait, Rx, SendError, Tx, spsc};
 use rustix::io::Errno;
 use std::collections::VecDeque;
@@ -12,12 +12,12 @@ use std::{
     cell::UnsafeCell, io, mem::transmute, os::fd::AsRawFd, sync::Arc, thread, time::Duration,
 };
 
-pub struct AioSlot<C: IOCallback> {
+pub struct AioSlot<C: CbArgs> {
     pub(crate) iocb: iocb,
     pub(crate) event: Option<Box<IOEvent<C>>>,
 }
 
-impl<C: IOCallback> AioSlot<C> {
+impl<C: CbArgs> AioSlot<C> {
     pub fn new(slot_id: u64) -> Self {
         Self { iocb: iocb { aio_data: slot_id, aio_reqprio: 1, ..Default::default() }, event: None }
     }
@@ -63,22 +63,22 @@ impl<C: IOCallback> AioSlot<C> {
     }
 }
 
-struct AioInner<C: IOCallback> {
+struct AioInner<C: CbArgs> {
     depth: usize,
     context: aio_context_t,
     slots: UnsafeCell<Vec<AioSlot<C>>>,
     null_file: File,
 }
 
-unsafe impl<C: IOCallback> Send for AioInner<C> {}
-unsafe impl<C: IOCallback> Sync for AioInner<C> {}
+unsafe impl<C: CbArgs> Send for AioInner<C> {}
+unsafe impl<C: CbArgs> Sync for AioInner<C> {}
 
-pub struct AioDriver<C: IOCallback, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
+pub struct AioDriver<C: CbArgs, Q: BlockingRxTrait<Box<IOEvent<C>>>, W: Worker<C>> {
     _marker: std::marker::PhantomData<(C, Q, W)>,
 }
 
 impl<
-    C: IOCallback,
+    C: CbArgs,
     Q: BlockingRxTrait<Box<IOEvent<C>>> + Send + 'static,
     W: Worker<C> + Send + 'static,
 > AioDriver<C, Q, W>
@@ -120,7 +120,7 @@ impl<
     }
 
     /// This worker process IOEvent fallocate & fsync
-    fn background_worker(rx: Rx<spsc::Array<Box<IOEvent<C>>>>) {
+    fn background_worker(inner: AioInner<C>, rx: Rx<spsc::Array<Box<IOEvent<C>>>>) {
         loop {
             match rx.recv() {
                 Ok(mut event) => {

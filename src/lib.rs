@@ -7,14 +7,14 @@
 //!
 //! Key components:
 //! - [IOEvent](crate::tasks::IOEvent): Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
-//! - [IOCallback](crate::tasks::IOCallback): Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
+//! - [CbArgs](crate::tasks::CbArgs): Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
 //! - [Worker](crate::callback_worker::Worker): Trait for workers handling completions.
 //! - [IOWorkers](crate::callback_worker::IOWorkers): Worker threads handling completions (implements `Worker`).
 //! - **IO Merging**: The engine supports merging sequential IO requests to reduce system call overhead. See the [`merge`] module for details.
 //!
 //! ## Callbacks
 //!
-//! The engine supports flexible callback mechanisms. You can use either closures or custom structs implementing the [IOCallback](crate::tasks::IOCallback) trait.
+//! The engine supports flexible callback mechanisms. You can use either closures or custom structs implementing the [CbArgs](crate::tasks::CbArgs) trait.
 //!
 //! ### Closure Callback
 //!
@@ -24,18 +24,18 @@
 //! ### Struct Callback
 //!
 //! For more complex state management or to avoid allocation overhead of `Box<dyn Fn...>`,
-//! you can define your own struct and implement `IOCallback`.
+//! you can define your own struct and implement `CbArgs`.
 //! For multiple types of callback, you can use enum.
 //!
 //! ```rust
-//! use io_engine::tasks::{IOCallback, IOEvent};
+//! use io_engine::tasks::{CbArgs, IOEvent};
 //! use rustix::io::Errno;
 //!
 //! struct MyCallback {
 //!     id: u64,
 //! }
 //!
-//! impl IOCallback for MyCallback {
+//! impl CbArgs for MyCallback {
 //!     fn call(self, _offset: i64, res: Result<Option<io_buffer::Buffer>, Errno>) {
 //!         match res {
 //!             Ok(Some(buf)) => println!("Operation {} completed, buffer len: {}", self.id, buf.len()),
