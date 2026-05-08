@@ -9,10 +9,17 @@ use rustix::io::Errno;
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[repr(u8)]
 pub enum IOAction {
-    Read = 0,
-    Write = 1,
+    Read = 0,  // The same with IOCB_CMD_PREAD
+    Write = 1, // the same with IOCB_CMD_PWRITE
     Alloc = 2,
     Fsync = 3,
+}
+
+impl IOAction {
+    #[inline(always)]
+    pub fn is_read_write(&self) -> bool {
+        (*self as u8) < (IOAction::Alloc as u8)
+    }
 }
 
 pub trait CbArgs: Sized + 'static + Send + Unpin {
