@@ -1,5 +1,5 @@
 use crate::callback_worker::Worker;
-//use crate::driver::aio::AioDriver;
+use crate::driver::aio::AioDriver;
 use crate::driver::uring::UringDriver; // Import UringDriver
 use crate::tasks::{CbArgs, IOEvent};
 use crossfire::BlockingRxTrait;
@@ -42,7 +42,6 @@ where
 {
     match driver_type {
         Driver::Uring => UringDriver::<C, Q, W>::start(depth as u32, rx, cb_workers),
-        _ => unreachable!(),
-        //        Driver::Aio => AioDriver::<C, Q, W>::start(depth, rx, cb_workers),
+        Driver::Aio => AioDriver::<C, Q, W>::start(depth, rx, cb_workers),
     }
 }
