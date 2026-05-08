@@ -36,3 +36,12 @@ compress = []
 [[bench]]
 name = "channel_bench"
 harness = false
+
+[lints.clippy]
+new_ret_no_self = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+needless_return = "allow"
+mut_from_ref = "allow"
+transmute_ptr_to_ref = "allow"
+len_without_is_empty = "allow"
