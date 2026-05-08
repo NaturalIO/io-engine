@@ -1,7 +1,7 @@
-use crate::callback_worker::IOWorkers;
+use crate::callback_worker::InlineClosure;
 use crate::context::{Driver, setup};
 use crate::merge::MergeSubmitter;
-use crate::tasks::{ClosureCb, IOAction, IOEvent};
+use crate::tasks::{IOAction, IOEvent};
 use std::os::fd::{AsRawFd, RawFd};
 use std::{
     sync::{Arc, Mutex},
@@ -9,62 +9,69 @@ use std::{
 };
 
 use crate::test::*;
-use crossfire::{
-    BlockingTxTrait,
-    waitgroup::{WaitGroup, WaitGroupGuard},
-};
+use crossfire::waitgroup::{WaitGroup, WaitGroupGuard};
 use io_buffer::Buffer;
+use rstest::rstest;
 
-#[test]
-fn test_merged_submit_aio() {
+#[rstest]
+#[case(Driver::Aio)]
+#[case(Driver::Uring)]
+fn test_merged_submit(#[case] driver: Driver) {
     setup_log();
     let temp_file = make_temp_file();
     let owned_fd = create_temp_file(temp_file.as_ref());
-
-    println!("created temp file fd={}", owned_fd.as_raw_fd());
     let fd = owned_fd.as_raw_fd();
     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
-    setup::<ClosureCb, _, _>(128, rx, IOWorkers::new(2), Driver::Aio).unwrap();
 
-    _test_merge_submit(fd, tx.clone(), 1024, 1024, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 512, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 256, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 64 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 32 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 1 * 1024);
+    // Use a shared closure that can be updated for different test phases
+    type CbFn = Box<dyn Fn(i64, Result<Option<Buffer>, rustix::io::Errno>) + Send>;
+    let current_cb = Arc::new(Mutex::new(None::<CbFn>));
+    let current_cb_clone = current_cb.clone();
 
-    std::thread::sleep(Duration::from_secs(1));
+    let worker = InlineClosure(Box::new(move |_guard: WaitGroupGuard<()>, offset, res| {
+        if let Some(cb) = current_cb_clone.lock().unwrap().as_ref() {
+            cb(offset, res);
+        }
+    }));
+    setup::<WaitGroupGuard<()>, _, _>(128, rx, worker, driver).unwrap();
+
+    let runner = |io_size, batch_num, merge_size_limit| {
+        _test_merge_submit(
+            fd,
+            tx.clone(),
+            io_size,
+            batch_num,
+            merge_size_limit,
+            current_cb.clone(),
+        );
+    };
+
+    runner(1024, 1024, 16 * 1024);
+    runner(1024, 512, 16 * 1024);
+    runner(1024, 256, 16 * 1024);
+    runner(1024, 64, 64 * 1024);
+    runner(1024, 64, 32 * 1024);
+    runner(1024, 64, 16 * 1024);
+    runner(1024, 64, 1 * 1024);
+
+    std::thread::sleep(Duration::from_millis(100));
 }
 
-#[test]
-fn test_merged_submit_uring() {
-    setup_log();
-    let temp_file = make_temp_file();
-    let owned_fd = create_temp_file(temp_file.as_ref());
-
-    let fd = owned_fd.as_raw_fd();
-    println!("created temp file fd={}", fd);
-    let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
-    setup::<ClosureCb, _, _>(128, rx, IOWorkers::new(2), Driver::Uring).unwrap();
-
-    _test_merge_submit(fd, tx.clone(), 1024, 1024, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 512, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 256, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 64 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 32 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 16 * 1024);
-    _test_merge_submit(fd, tx.clone(), 1024, 64, 1 * 1024);
-
-    std::thread::sleep(Duration::from_secs(1));
-}
-
-fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send + 'static>(
+fn _test_merge_submit<
+    S: crossfire::BlockingTxTrait<Box<IOEvent<WaitGroupGuard<()>>>> + Clone + Send + 'static,
+>(
     fd: RawFd, sender: S, io_size: usize, batch_num: usize, merge_size_limit: usize,
+    current_cb: Arc<
+        Mutex<Option<Box<dyn Fn(i64, Result<Option<Buffer>, rustix::io::Errno>) + Send>>>,
+    >,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
-    let mut m_write =
-        MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Write);
+    let mut m_write = MergeSubmitter::<WaitGroupGuard<()>, _>::new(
+        fd,
+        sender.clone(),
+        merge_size_limit,
+        IOAction::Write,
+    );
 
     let mut buf_all = Vec::<u8>::with_capacity(batch_num * io_size);
     buf_all.resize_with(batch_num * io_size, || fastrand::u8(..));
@@ -73,133 +80,95 @@ fn _test_merge_submit<S: BlockingTxTrait<Box<IOEvent<ClosureCb>>> + Clone + Send
 
     let wg = WaitGroup::new((), 0);
 
-    macro_rules! mk_cb {
-        ($wg: expr) => {{
-            let _guard: WaitGroupGuard<()> = $wg.add_guard();
-            ClosureCb(Box::new(move |_offset, _res| {
-                drop(_guard);
-            }))
-        }};
-    }
+    // Set write callback
+    *current_cb.lock().unwrap() = None;
 
     for i in (0..batch_num / 2).step_by(2) {
         let mut buf = Buffer::aligned(io_size as i32).unwrap();
         buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
         let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-        event.set_callback(mk_cb!(wg));
+        event.set_args(wg.add_guard());
         m_write.add_event(event).expect("add_event");
     }
-    println!("-- write 1");
 
     for i in batch_num / 2..batch_num {
         let mut buf = Buffer::aligned(io_size as i32).unwrap();
         buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
         let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-        event.set_callback(mk_cb!(wg));
+        event.set_args(wg.add_guard());
         m_write.add_event(event).expect("add_event");
     }
-    println!("---write 2");
 
     for i in (1..(batch_num / 2 + 1)).step_by(2) {
         let mut buf = Buffer::aligned(io_size as i32).unwrap();
         buf.copy_from(0, &buf_all[i * io_size..(i + 1) * io_size]);
         let mut event = IOEvent::new(fd, buf, IOAction::Write, (i * io_size) as i64);
-        event.set_callback(mk_cb!(wg));
+        event.set_args(wg.add_guard());
         m_write.add_event(event).expect("add_event");
     }
     m_write.flush().expect("flush");
     wg.wait();
-    println!("wriiten");
-    // TODO assert f.size
+    println!("written");
 
     let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-    let mut m_read =
-        MergeSubmitter::<ClosureCb, _>::new(fd, sender.clone(), merge_size_limit, IOAction::Read);
-    println!("--- reading");
+    let mut m_read = MergeSubmitter::<WaitGroupGuard<()>, _>::new(
+        fd,
+        sender.clone(),
+        merge_size_limit,
+        IOAction::Read,
+    );
+
+    // Set read callback
+    {
+        let _read_buf = read_buf.clone();
+        *current_cb.lock().unwrap() = Some(Box::new(move |offset, res| {
+            let mut _buf_all = _read_buf.lock().unwrap();
+            match res {
+                Ok(Some(buffer)) => {
+                    _buf_all.copy_from(offset as usize, buffer.as_ref());
+                }
+                Ok(None) => {}
+                Err(_e) => {
+                    panic!("read error: {}", _e);
+                }
+            }
+        }));
+    }
 
     for i in (0..batch_num / 2).step_by(2) {
         let buf = Buffer::aligned(io_size as i32).unwrap();
         let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-        let _read_buf = read_buf.clone();
-        let offset = i * io_size;
-        let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
-            let mut _buf_all = _read_buf.lock().unwrap();
-            match res {
-                Ok(buf) => {
-                    if let Some(buffer) = buf {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                }
-                Err(_e) => {
-                    panic!("read error: {}", _e);
-                }
-            }
-            drop(_guard);
-        })));
+        event.set_args(wg.add_guard());
         m_read.add_event(event).expect("add_event");
     }
-
-    println!("--- read 1");
 
     for i in batch_num / 2..batch_num {
         let buf = Buffer::aligned(io_size as i32).unwrap();
         let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-        let _read_buf = read_buf.clone();
-        let offset = i * io_size;
-        let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
-            let mut _buf_all = _read_buf.lock().unwrap();
-            match res {
-                Ok(buf) => {
-                    if let Some(buffer) = buf {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                }
-                Err(_e) => {
-                    panic!("read error: {}", _e);
-                }
-            }
-            drop(_guard);
-        })));
+        event.set_args(wg.add_guard());
         m_read.add_event(event).expect("add_event");
     }
 
-    println!("--- read 2");
     for i in (1..(batch_num / 2 + 1)).step_by(2) {
         let buf = Buffer::aligned(io_size as i32).unwrap();
         let mut event = IOEvent::new(fd, buf, IOAction::Read, (i * io_size) as i64);
-        let _read_buf = read_buf.clone();
-        let offset = i * io_size;
-        let _guard = wg.add_guard();
-        event.set_callback(ClosureCb(Box::new(move |_offset, res| {
-            let mut _buf_all = _read_buf.lock().unwrap();
-            match res {
-                Ok(buf) => {
-                    if let Some(buffer) = buf {
-                        _buf_all.copy_from(offset, buffer.as_ref());
-                    }
-                }
-                Err(_e) => {
-                    panic!("read error: {}", _e);
-                }
-            }
-            drop(_guard);
-        })));
+        event.set_args(wg.add_guard());
         m_read.add_event(event).expect("add_event");
     }
-    println!("--- read 3");
     m_read.flush().expect("flush");
     wg.wait();
 
     assert_eq!(md51, md5::compute(read_buf.lock().unwrap().as_ref()));
+
+    // Clear callback
+    *current_cb.lock().unwrap() = None;
 }
 
 #[test]
 fn test_event_merge_buffer_logic() {
     setup_log();
     let merge_size_limit = 4 * 1024;
-    let mut buffer = crate::merge::MergeBuffer::<ClosureCb>::new(merge_size_limit);
+    let mut buffer = crate::merge::MergeBuffer::<()>::new(merge_size_limit);
 
     let fd = 100; // Dummy fd
 
@@ -210,7 +179,7 @@ fn test_event_merge_buffer_logic() {
     // --- Scenario 1: Add a single event ---
     let event1 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
     // clone for later comparison
-    let event1_clone: IOEvent<ClosureCb> =
+    let event1_clone: IOEvent<()> =
         IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 0);
     assert!(buffer.may_add_event(&event1));
     buffer.push_event(event1);
@@ -230,6 +199,7 @@ fn test_event_merge_buffer_logic() {
     buffer.push_event(event2);
 
     // Event 3: offset 1KB, size 1KB (contiguous)
+
     let event3 = IOEvent::new(fd, Buffer::aligned(1024).unwrap(), IOAction::Write, 1024);
     buffer.push_event(event3);
     assert_eq!(buffer.len(), 2);
