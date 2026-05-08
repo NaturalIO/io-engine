@@ -20,15 +20,14 @@ pub enum Driver {
 /// you should choose the `crossfire` channel type based on your sharing model:
 ///
 /// * **Shared Worker (Multiple Producers):** If you have multiple submission channels sharing the same
-///   callback worker, use the [IOWorkers](crate::callback_worker::IOWorkers) struct,
-///   or pass `crossfire::MTx` (from `mpsc` or `mpmc` channels) with your custom worker implementation.
+///   callback worker, pass `crossfire::MTx` (from `mpsc` or `mpmc` channels) with your custom worker implementation.
 ///   This allows multiple producers to send completion events to a single consumer (worker).
 ///
 /// * **Single Instance (Dedicated Worker):** If you have a single submission channel with its own dedicated
 ///   callback worker, use `crossfire::Tx` (from `spsc` channels). This is more efficient for single-producer
 ///   scenarios.
 ///
-/// * **inline callback:** If you have a very light callback logic, you can use [Inline](crate::callback_worker::Inline)
+/// * **inline callback:** If you have a very light callback logic, you can use [InlineClosure](crate::InlineClosure)
 pub fn setup<C, Q, W>(
     depth: usize,
     rx: Q,
