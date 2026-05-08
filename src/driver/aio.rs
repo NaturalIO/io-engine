@@ -39,7 +39,7 @@ impl<C: CbArgs> AioSlot<C> {
     pub fn fill_exit_slot(&mut self, null_fd: RawFd) {
         let iocb = &mut self.iocb;
         // NOTE: the aio_data is init with slot_id, normally we don't touch it;
-        // on exit the choosen slot will fill with EXIT_MAGIC on higher bits.
+        // on exit the chosen slot will fill with EXIT_MAGIC on higher bits.
         // This slot will never used again, because no more io from upstream channel.
         iocb.aio_data |= EXIT_MAGIC;
         iocb.aio_fildes = null_fd as libc::__u32;

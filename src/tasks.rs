@@ -74,12 +74,14 @@ impl<C: CbArgs> fmt::Debug for IOEvent<C> {
 }
 
 impl<C: CbArgs> IOEvent<C> {
+    /// For IOAction::Read / IOAction::Write
     #[inline]
     pub fn new(fd: RawFd, buf: Buffer, action: IOAction, offset: i64) -> Self {
         log_assert!(!buf.is_empty(), "{:?} offset={}, buffer size == 0", action, offset);
         Self { buf_or_len: BufOrLen::Buffer(buf), fd, action, offset, res: i32::MIN, args: None }
     }
 
+    /// For IOAction::Alloc / IOAction::Fsync
     #[inline]
     pub fn new_no_buf(fd: RawFd, action: IOAction, offset: i64, len: u64) -> Self {
         Self {

@@ -6,186 +6,166 @@
 //! ## Architecture
 //!
 //! Key components:
-//! - [IOEvent](crate::tasks::IOEvent): Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
-//! - [CbArgs](crate::tasks::CbArgs): Trait for handling completion. `ClosureCb` is provided for closure-based callbacks.
-//! - [Worker](crate::callback_worker::Worker): Trait for workers handling completions.
-//! - [IOWorkers](crate::callback_worker::IOWorkers): Worker threads handling completions (implements `Worker`).
+//! - [IOEvent]:
+//!   - Represents a single IO operation (Read/Write). Carries buffer, offset, fd.
+//!   - Because IOEvent is large (>=64B), you should submit `Box<IOEvent<_>>` through channel
+//! - [CbArgs]: Optional completion arguments along with IOEvent.
+//! - [Worker]: Trait for workers handling completions:
+//!   - Inline closure [InlineClosure]
+//!   - Inline function
+//!   - Send the complete IOEvent through spsc, mpsc, mpmc channel sender
 //! - **IO Merging**: The engine supports merging sequential IO requests to reduce system call overhead. See the [`merge`] module for details.
 //!
 //! ## Callbacks
 //!
-//! The engine supports flexible callback mechanisms. You can use either closures or custom structs implementing the [CbArgs](crate::tasks::CbArgs) trait.
+//! The engine supports flexible callback mechanisms. You may:
+//! - Capture some global arguments inside closure of callback workers
+//! - Pass arguments with IOEvent with [IOEvent::set_args()]
 //!
-//! ### Closure Callback
+//! ### Example (with WaitGroupGuard as CbArgs)
 //!
-//! Use `ClosureCb` to wrap a closure. This is convenient for simple logic or one-off tasks.
-//! The closure takes ownership of the completed `IOEvent`.
-//!
-//! ### Struct Callback
-//!
-//! For more complex state management or to avoid allocation overhead of `Box<dyn Fn...>`,
-//! you can define your own struct and implement `CbArgs`.
-//! For multiple types of callback, you can use enum.
-//!
-//! ```rust
-//! use io_engine::tasks::{CbArgs, IOEvent};
+//! ```rust,no_run
+//! use io_engine::{InlineClosure, Driver, setup, IOAction, IOEvent};
+//! use crossfire::{mpsc, waitgroup::{WaitGroup, WaitGroupGuard}};
+//! use io_buffer::{Buffer, rand_buffer};
 //! use rustix::io::Errno;
 //!
-//! struct MyCallback {
-//!     id: u64,
-//! }
+//! let (tx, rx) = mpsc::bounded_blocking(128);
 //!
-//! impl CbArgs for MyCallback {
-//!     fn call(self, _offset: i64, res: Result<Option<io_buffer::Buffer>, Errno>) {
-//!         match res {
-//!             Ok(Some(buf)) => println!("Operation {} completed, buffer len: {}", self.id, buf.len()),
-//!             Ok(None) => println!("Operation {} completed (no buffer)", self.id),
-//!             Err(e) => println!("Operation {} failed, error: {}", self.id, e),
-//!         }
-//!     }
-//! }
+//! // Use a shared closure that can be updated for different test phases
+//! let worker = InlineClosure(Box::new(move |_guard: WaitGroupGuard<()>, offset, res| {}));
+//! // WaitGroupGuard has impl CbArgs trait
+//! setup::<WaitGroupGuard<()>, _, _>(128, rx, worker, Driver::Uring).unwrap();
+//! let wg = WaitGroup::new((), 0);
+//! let mut buf = Buffer::aligned(4096i32).unwrap();
+//! rand_buffer(&mut buf);
+//! let fd = todo!("init your fd");
+//! let mut event = IOEvent::new(fd, buf, IOAction::Write, 0);
+//! event.set_args(wg.add_guard());
+//! let _ = tx.send(Box::new(event));
 //! ```
 //!
 //! ## Short Read/Write Handling
 //!
 //! The engine supports transparent handling of short reads and writes (partial IO).
-//! When a read or write operation completes, the callback worker automatically adjusts
-//! the buffer length to reflect the actual bytes transferred.
+//! When a read or write operation completes, the callback worker can use `callback_unchecked`
+//! to automatically adjust the buffer length to reflect the actual bytes transferred.
 //!
 //! ### How It Works
 //!
-//! - When an IO operation completes, the `callback_unchecked` method adjusts `Buffer::len()`
-//!   to match the actual bytes transferred (`res`).
-//! - For read operations, this means the buffer contains exactly the data that was read.
-//! - For write operations, the buffer length is also adjusted to reflect completion status.
+//! - The [IOEvent::callback] method accepts a closure that allows you to detect if short I/O
+//!   is due to reaching the file end (which is normal) or an actual error condition
+//!   that requires retry.
+//! - Optionally, you can ignore all short I/O by calling [IOEvent::callback_unchecked], which will
+//!   adjust Buffer into the length actually read/write
 //!
-//! ### Callback Worker Implementation
-//!
-//! When implementing a custom callback worker, you should use `callback_unchecked` which detect
-//! short I/O and change reading Buffer length to exact copied bytes.
-//!
-//! ```rust,ignore
-//! // In your callback worker thread
-//! let (queue_tx, queue_rx) = mpsc::bounded_blocking(1000);
-//! loop {
-//!     match queue_rx.recv() {
-//!         Ok(event) => event.callback_unchecked(),
-//!         Err(_) => break,
-//!     }
-//! }
-//! ```
-//!
-//! ### Advanced: Detecting Short I/O with File Boundary Check
-//!
-//! The `callback` method accepts a closure that allows you to detect if short I/O
-//! is due to reaching the file end (which is normal) or an actual error condition
-//! that requires retry:
-//!
-//! ```rust,ignore
-//! use crossfire::WeakTx;
-//! let (queue_tx, queue_rx) = mpsc::bounded_blocking::<Box<IOEvent<_>>>(1000);
-//! let weak_tx: WeakTx<_> = queue_tx.downgrade();
-//! // use a weak reference of sender to allow the main sender can be drop.
-//! // io-engine rely on error of receiver to notify exit.
-//! while let Ok() = queue_rx.recv() {
-//!     // check_short_read returns true if offset exceeds file end
-//!     if let Err(event_retry) = event.callback(|offset|  offset < file_size ) {
-//!         // Short I/O detected, resubmit the event
-//!         if let Some(tx) = weak_tx.upgrade::<MTx<_>>() {
-//!             tx.send(event_retry).unwrap();
-//!         } else {
-//!             event_retry.callback_unchecked();
-//!         }
-//!     };
-//! }
-//! ```
-//!
-//! The closure receives the current offset and should return `true` if the offset
-//! exceeds the file boundary (indicating EOF). If the closure returns `true`,
-//! the short I/O is considered an error condition that may need retry.
-//!
-//! ## Usage Example (io_uring)
+//! ## Example (TxOneshot as CbArgs and Short I/O handling)
 //!
 //! ```rust
-//! use io_engine::callback_worker::IOWorkers;
-//! use io_engine::{setup, Driver};
-//! use io_engine::tasks::{ClosureCb, IOAction, IOEvent};
-//! use io_buffer::Buffer;
+//! use io_engine::{setup, Driver, IOAction, IOEvent, CbArgs};
+//! use io_buffer::{Buffer, rand_buffer};
 //! use std::fs::OpenOptions;
 //! use std::os::fd::AsRawFd;
-//! use crossfire::oneshot;
+//! use std::thread;
+//! use rustix::io::Errno;
+//! use crossfire::{mpsc, oneshot, MTx};
 //!
-//! fn main() {
-//!     // 1. Prepare file
-//!     let file = OpenOptions::new()
-//!         .read(true)
-//!         .write(true)
-//!         .create(true)
-//!         .open("/tmp/test_io_engine.data")
-//!         .unwrap();
-//!     let fd = file.as_raw_fd();
+//! struct OneshotArg (oneshot::TxOneshot<Result<Option<Buffer>, Errno>>);
 //!
-//!     // 2. Create channels for submission
-//!     // This channel is used to send events into the engine's submission queue
-//!     let (tx, rx) = crossfire::mpsc::bounded_blocking(128);
+//! impl CbArgs for OneshotArg {}
 //!
-//!     // 3. Setup the driver (io_uring)
-//!     // worker_num=1, depth=16
-//!     // This spawns the necessary driver threads.
-//!     setup::<ClosureCb, _, _>(
-//!         16,
-//!         rx,
-//!         IOWorkers::new(1),
-//!         Driver::Uring
-//!     ).expect("Failed to setup driver");
+//! // 1. Prepare file
+//! let file = OpenOptions::new()
+//!     .read(true)
+//!     .write(true)
+//!     .create(true)
+//!     .open("/tmp/test_io_engine.data")
+//!     .unwrap();
+//! let fd = file.as_raw_fd();
 //!
-//!     // 4. Submit a Write
-//!     let mut buffer = Buffer::aligned(4096).unwrap();
-//!     buffer[0] = 65; // 'A'
-//!     let mut event = IOEvent::new(fd, buffer, IOAction::Write, 0);
 //!
-//!     // Create oneshot for this event's completion
-//!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |_offset, res| {
-//!         let _ = done_tx.send(res);
-//!     })));
+//! // 2. Create channels for submission
+//! let (submit_tx, submit_rx) = mpsc::bounded_blocking(128);
 //!
-//!     // Send to engine
-//!     tx.send(Box::new(event)).expect("submit");
+//! // 3. Setup the driver (io_uring) with a channel worker
+//! // This example uses a channel to wait for completion.
+//! let (done_tx, done_rx) = crossfire::mpsc::bounded_blocking(128);
+//! /// By default `MTx<_>` has impl Worker trait
+//! setup::<OneshotArg, _, _>(
+//!     16,
+//!     submit_rx,
+//!     done_tx, // Sender implements Worker
+//!     Driver::Uring
+//! ).expect("Failed to setup driver");
 //!
-//!     // 5. Wait for completion
-//!     let res = done_rx.recv().unwrap();
-//!     res.map_err(|_| "Write failed").expect("Write failed");
+//! // example for short-io handling
+//! let weak_tx = submit_tx.downgrade();
+//! let file_size = 4096;
 //!
-//!     // 6. Submit a Read
-//!     let buffer = Buffer::aligned(4096).unwrap();
-//!     let mut event = IOEvent::new(fd, buffer, IOAction::Read, 0);
+//! // spawn callback worker
+//! let th = thread::spawn(move || {
+//!     let cb = | done_tx: OneshotArg, _offset, res| {
+//!         done_tx.0.send(res);
+//!     };
+//!     while let Ok(event) = done_rx.recv() {
+//!         if let Err(short_event) = event.callback(
+//!             // for simplicity, we just demonstrate checking a static file bound here
+//!             | offset | offset < file_size,
+//!             &cb,
+//!         ) {
+//!             if let Some(submit_tx) = weak_tx.upgrade::<MTx<mpsc::Array<Box<IOEvent<OneshotArg>>>>>() {
+//!                 submit_tx.send(short_event).expect("resubmit");
+//!             } else {
+//!                 // submit tx already dropped, does not matter.
+//!                 short_event.callback_unchecked(&cb);
+//!             }
+//!         }
+//!     }
+//! });
+
 //!
-//!     let (done_tx, done_rx) = oneshot::oneshot();
-//!     event.set_callback(ClosureCb(Box::new(move |_offset, res| {
-//!         let _ = done_tx.send(res);
-//!     })));
+//! // 4. Submit a Write
+//! let mut buf = Buffer::aligned(4096).unwrap();
+//! rand_buffer(&mut buf);
+//! let written_buf = buf.clone();
+//! let mut event = IOEvent::new(fd, buf, IOAction::Write, 0);
+//! let (task_tx, task_rx) = oneshot::oneshot();
+//! event.set_args(OneshotArg(task_tx));
 //!
-//!     tx.send(Box::new(event)).expect("submit");
+//! // Send to engine
+//! submit_tx.send(Box::new(event)).expect("submit");
 //!
-//!     let res = done_rx.recv().unwrap();
-//!     let read_buf = res.expect("Read failed");
-//!     assert!(read_buf.is_some());
-//!     let read_buf = read_buf.unwrap();
-//!     assert_eq!(read_buf.len(), 4096);
-//!     assert_eq!(read_buf[0], 65);
-//! }
+//! // Wait for completion
+//! let res: Result<Option<Buffer>, Errno> = task_rx.recv().unwrap_or(Err(Errno::SHUTDOWN));
+//! assert!(res.is_ok());
+//!
+//! // 5. Submit a Read
+//! let buffer = Buffer::aligned(4096).unwrap();
+//! let mut event = IOEvent::new(fd, buffer, IOAction::Read, 0);
+//! let (task_tx, task_rx) = oneshot::oneshot();
+//! event.set_args(OneshotArg(task_tx));
+//! submit_tx.send(Box::new(event)).expect("submit");
+//!
+//! let res: Result<Option<Buffer>, Errno> = task_rx.recv().unwrap_or(Err(Errno::SHUTDOWN));
+//! let read_buf = res.expect("ok").unwrap();
+//! assert_eq!(read_buf.len(), 4096);
+//! assert_eq!(&read_buf[..], &written_buf[..]);
+//! drop(submit_tx);
+//! th.join();
+//! // callback worker exited
 //! ```
 
 #[macro_use]
 extern crate captains_log;
 
-pub mod callback_worker;
+mod callback_worker;
+pub use callback_worker::{InlineClosure, Worker};
 mod context;
 pub use context::{Driver, setup};
 mod driver;
 pub mod merge;
-pub mod tasks;
+mod tasks;
+pub use tasks::{CbArgs, IOAction, IOEvent};
 
 #[cfg(test)]
 mod test;
