@@ -187,7 +187,7 @@ impl<C: CbArgs> MergeBuffer<C> {
                 // Allocation failed: error out all events
                 for merged in sub_tasks.drain() {
                     if let Some(args) = merged.args {
-                        args.set_merge_error(Errno::NOMEM);
+                        args.set_error(Errno::NOMEM);
                     }
                 }
                 None
@@ -270,7 +270,7 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
         {
             event.set_errno(e);
             event._callback_unchecked(false, |args: C, _offset: i64, _res| {
-                args.set_merge_error(e);
+                args.set_error(e);
             });
             return Err(e);
         }
@@ -296,7 +296,7 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
                 let e = Errno::SHUTDOWN;
                 fail_event.set_errno(e);
                 fail_event._callback_unchecked(false, |args: C, _offset: i64, _res| {
-                    args.set_merge_error(e);
+                    args.set_error(e);
                 });
                 return Err(e);
             }

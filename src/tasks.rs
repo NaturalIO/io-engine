@@ -23,8 +23,8 @@ impl IOAction {
 }
 
 pub trait CbArgs: Sized + 'static + Send + Unpin {
-    /// only called in MergeSubmitter (for NOMEM or SHUTDOWN)
-    fn set_merge_error(self, _e: Errno) {}
+    /// called in MergeSubmitter (for NOMEM or SHUTDOWN)
+    fn set_error(self, _e: Errno) {}
 }
 
 impl CbArgs for () {}
