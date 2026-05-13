@@ -1,6 +1,6 @@
 use crate::callback_worker::InlineClosure;
 use crate::context::{Driver, setup};
-use crate::merge::MergeSubmitter;
+use crate::merge::{MergeBuffer, MergeSubmitter};
 use crate::tasks::{IOAction, IOEvent};
 use std::os::fd::{AsRawFd, RawFd};
 use std::{
@@ -66,7 +66,7 @@ fn _test_merge_submit<
     >,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
-    let mut m_write = MergeSubmitter::<WaitGroupGuard<()>, _>::new(
+    let mut m_write = MergeSubmitter::<WaitGroupGuard<()>, _, MergeBuffer<_>>::new(
         fd,
         sender.clone(),
         merge_size_limit,
@@ -111,7 +111,7 @@ fn _test_merge_submit<
     println!("written");
 
     let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-    let mut m_read = MergeSubmitter::<WaitGroupGuard<()>, _>::new(
+    let mut m_read = MergeSubmitter::<WaitGroupGuard<()>, _, _>::new(
         fd,
         sender.clone(),
         merge_size_limit,
