@@ -37,6 +37,8 @@ use crossfire::{BlockingTxTrait, SendError};
 use embed_collections::SegList;
 use io_buffer::Buffer;
 use rustix::io::Errno;
+use std::borrow::BorrowMut;
+use std::marker::PhantomData;
 use std::os::fd::RawFd;
 
 /// Info about the first event and merged state.
@@ -227,14 +229,19 @@ impl<C: CbArgs> MergeBuffer<C> {
 /// This component buffers incoming [`IOEvent`]s into a [`MergeBuffer`].
 /// It ensures that events for the same file descriptor and IO action are
 /// considered for merging to optimize system calls.
-pub struct MergeSubmitter<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> {
+pub struct MergeSubmitter<
+    C: CbArgs,
+    S: BlockingTxTrait<Box<IOEvent<C>>>,
+    B: BorrowMut<MergeBuffer<C>>,
+> {
     fd: RawFd,
-    buffer: MergeBuffer<C>,
+    buffer: B,
     sender: S,
     action: IOAction,
+    _phan: PhantomData<fn(&C)>,
 }
 
-impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
+impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S, MergeBuffer<C>> {
     /// Creates a new `MergeSubmitter`.
     ///
     /// # Arguments
@@ -242,9 +249,25 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// * `sender` - A channel sender to send prepared [`IOEvent`]s to the IO driver.
     /// * `merge_size_limit` - The maximum data size for a merged event buffer.
     /// * `action` - The primary IO action (Read/Write) for this submitter.
+    #[inline]
     pub fn new(fd: RawFd, sender: S, merge_size_limit: usize, action: IOAction) -> Self {
         log_assert!(merge_size_limit > 0);
-        Self { fd, buffer: MergeBuffer::<C>::new(merge_size_limit), sender, action }
+        Self {
+            fd,
+            sender,
+            action,
+            buffer: MergeBuffer::<C>::new(merge_size_limit),
+            _phan: Default::default(),
+        }
+    }
+}
+
+impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>, B: BorrowMut<MergeBuffer<C>>>
+    MergeSubmitter<C, S, B>
+{
+    #[inline]
+    pub fn with_buffer(fd: RawFd, sender: S, action: IOAction, buffer: B) -> Self {
+        Self { fd, sender, action, buffer, _phan: Default::default() }
     }
 
     /// Adds an [`IOEvent`] to the internal buffer, potentially triggering a flush.
@@ -260,12 +283,14 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     /// An `Ok(())` on success.
     /// When submit sender closed, set Errno::SHUTDOWN on `event` and return the same Errno
     /// On debug mode, will validate event.fd and event.action.
+    #[inline]
     pub fn add_event(&mut self, mut event: IOEvent<C>) -> Result<(), Errno> {
         log_debug_assert_eq!(self.fd, event.fd);
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
+        let buffer = self.buffer.borrow_mut();
 
-        if (event_size >= self.buffer.merge_size_limit as u64 || !self.buffer.may_add_event(&event))
+        if (event_size >= buffer.merge_size_limit as u64 || !buffer.may_add_event(&event))
             && let Err(e) = self._flush()
         {
             event.set_errno(e);
@@ -274,7 +299,7 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
             });
             return Err(e);
         }
-        if self.buffer.push_event(event) {
+        if self.buffer.borrow_mut().push_event(event) {
             self._flush()?;
         }
         return Ok(());
@@ -284,13 +309,14 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S> {
     ///
     /// # Returns
     /// An `Ok(())` on success, or an `rustix::Errno` when sending the submit tx closed.
+    #[inline]
     pub fn flush(&mut self) -> Result<(), Errno> {
         self._flush()
     }
 
     #[inline(always)]
     fn _flush(&mut self) -> Result<(), Errno> {
-        if let Some(event) = self.buffer.flush(self.fd, self.action) {
+        if let Some(event) = self.buffer.borrow_mut().flush(self.fd, self.action) {
             trace!("mio: submit event from flush {:?}", event);
             if let Err(SendError(mut fail_event)) = self.sender.send(Box::new(event)) {
                 let e = Errno::SHUTDOWN;
