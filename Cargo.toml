@@ -1,6 +1,6 @@
 [package]
 name = "io-engine"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 authors = ["plan <frostyplanet@gmail.com>"]
 repository = "https://github.com/NaturalIO/io-engine"
@@ -18,9 +18,9 @@ io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"
 io-buffer = { version="1"}
-crossfire = ">=3.1.9"
+crossfire = ">=3.1.16"
 io-uring = "0.7"
-embed-collections = { version=">=0.5", default-features=false }
+embed-collections = { version=">=0.12", features=["seglist"], default-features=false }
 
 [dev-dependencies]
 fastrand = "2.3"
