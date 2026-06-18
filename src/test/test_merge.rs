@@ -1,7 +1,7 @@
 use crate::callback_worker::InlineClosure;
 use crate::context::{Driver, setup};
 use crate::merge::{MergeBuffer, MergeSubmitter};
-use crate::tasks::{IOAction, IOEvent};
+use crate::tasks::{CbArgs, IOAction, IOEvent};
 use std::os::fd::{AsRawFd, RawFd};
 use std::{
     sync::{Arc, Mutex},
@@ -12,6 +12,11 @@ use crate::test::*;
 use crossfire::waitgroup::{WaitGroup, WaitGroupGuard};
 use io_buffer::Buffer;
 use rstest::rstest;
+use rustix::io::Errno;
+
+fn on_merge_failure<C: CbArgs>(_arg: C, e: Errno) {
+    panic!("merge failure: {e}");
+}
 
 #[rstest]
 #[case(Driver::Aio)]
@@ -66,11 +71,12 @@ fn _test_merge_submit<
     >,
 ) {
     println!("test_merged_submit {} {} {}", io_size, batch_num, merge_size_limit);
-    let mut m_write = MergeSubmitter::<WaitGroupGuard<()>, _, MergeBuffer<_>>::new(
+    let mut m_write = MergeSubmitter::<WaitGroupGuard<()>, _, MergeBuffer<_>, _>::new(
         fd,
         sender.clone(),
         merge_size_limit,
         IOAction::Write,
+        on_merge_failure::<WaitGroupGuard<()>>,
     );
 
     let mut buf_all = Vec::<u8>::with_capacity(batch_num * io_size);
@@ -111,11 +117,12 @@ fn _test_merge_submit<
     println!("written");
 
     let read_buf = Arc::new(Mutex::new(Buffer::aligned((batch_num * io_size) as i32).unwrap()));
-    let mut m_read = MergeSubmitter::<WaitGroupGuard<()>, _, _>::new(
+    let mut m_read = MergeSubmitter::<WaitGroupGuard<()>, _, _, _>::new(
         fd,
         sender.clone(),
         merge_size_limit,
         IOAction::Read,
+        on_merge_failure::<WaitGroupGuard<()>>,
     );
 
     // Set read callback
@@ -173,7 +180,7 @@ fn test_event_merge_buffer_logic() {
     let fd = 100; // Dummy fd
 
     // --- Test empty flush ---
-    assert!(buffer.flush(fd, IOAction::Write).is_none());
+    assert!(buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).is_none());
     assert_eq!(buffer.len(), 0);
 
     // --- Scenario 1: Add a single event ---
@@ -186,7 +193,7 @@ fn test_event_merge_buffer_logic() {
     assert_eq!(buffer.len(), 1);
 
     // Flush single event
-    let single_event_opt = buffer.flush(fd, IOAction::Write);
+    let single_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
     assert!(single_event_opt.is_some());
     let single_event = single_event_opt.unwrap();
     assert_eq!(single_event.offset, event1_clone.offset);
@@ -211,7 +218,7 @@ fn test_event_merge_buffer_logic() {
 
     // Now, flush the buffered events and check them
     assert_eq!(buffer.len(), 2);
-    let merged_event_opt = buffer.flush(fd, IOAction::Write);
+    let merged_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
     assert!(merged_event_opt.is_some());
     let merged_event = merged_event_opt.unwrap();
     assert_eq!(merged_event.offset, 0);
@@ -233,7 +240,7 @@ fn test_event_merge_buffer_logic() {
     assert!(is_full);
     assert_eq!(buffer.len(), 2);
 
-    let merged_event_opt_2 = buffer.flush(fd, IOAction::Write);
+    let merged_event_opt_2 = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
     assert!(merged_event_opt_2.is_some());
     let merged_event_2 = merged_event_opt_2.unwrap();
     assert_eq!(merged_event_2.offset, 3072);

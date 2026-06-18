@@ -32,12 +32,12 @@
 //! - [`MergeBuffer`]: Internal buffer logic.
 //! - [`MergeSubmitter`]: Wraps a sender channel and manages the merge logic before sending.
 
-use crate::tasks::{CbArgs, IOAction, IOEvent, IOEventMerged};
+use crate::tasks::{CbArgs, IOAction, IOEvent, IOEventMerged, TaskArgs};
 use crossfire::{BlockingTxTrait, SendError};
 use embed_collections::SegList;
 use io_buffer::Buffer;
 use rustix::io::Errno;
-use std::borrow::BorrowMut;
+use std::borrow::{Borrow, BorrowMut};
 use std::marker::PhantomData;
 use std::os::fd::RawFd;
 
@@ -156,44 +156,42 @@ impl<C: CbArgs> MergeBuffer<C> {
     }
 
     /// Takes all buffered events, building merged buffer if needed.
-    /// Returns the master event (Box<IOEvent>) or None if empty.
+    ///
+    /// - On success, Returns the master event (Box<IOEvent>) or None if empty;
+    /// - On failure, return merged event SegList
     #[inline(always)]
-    fn take(&mut self, action: IOAction) -> Option<Box<IOEvent<C>>> {
-        let info = self.merged_info.take()?;
-
-        // Single event: return directly without mem::replace
-        if self.merged_events.is_empty() {
-            return Some(info.first_event);
-        }
-
-        // Multiple events: take merged_events and build merged buffer
-        let sub_tasks = std::mem::replace(&mut self.merged_events, SegList::new());
-        debug_assert!(sub_tasks.len() > 1);
-        let size = info.total_size;
-        match Buffer::aligned(size as i32) {
-            Ok(mut buffer) => {
-                if action == IOAction::Write {
-                    let mut write_offset = 0;
-                    for merged in sub_tasks.iter() {
-                        buffer.copy_from(write_offset, merged.buf.as_ref());
-                        write_offset += merged.buf.len();
-                    }
-                }
-
-                // Reuse first_event as master, set merged buffer and subtasks
-                let mut master = info.first_event;
-                master.set_merged_tasks(buffer, sub_tasks);
-                Some(master)
+    fn take(
+        &mut self, action: IOAction,
+    ) -> Result<Option<Box<IOEvent<C>>>, SegList<IOEventMerged<C>>> {
+        if let Some(info) = self.merged_info.take() {
+            // Single event: return directly without mem::replace
+            if self.merged_events.is_empty() {
+                return Ok(Some(info.first_event));
             }
-            Err(_) => {
-                // Allocation failed: error out all events
-                for merged in sub_tasks.drain() {
-                    if let Some(args) = merged.args {
-                        args.set_merge_error(Errno::NOMEM);
+
+            // Multiple events: take merged_events and build merged buffer
+            let sub_tasks = std::mem::replace(&mut self.merged_events, SegList::new());
+            debug_assert!(sub_tasks.len() > 1);
+            let size = info.total_size;
+            match Buffer::aligned(size as i32) {
+                Ok(mut buffer) => {
+                    if action == IOAction::Write {
+                        let mut write_offset = 0;
+                        for merged in sub_tasks.iter() {
+                            buffer.copy_from(write_offset, merged.buf.as_ref());
+                            write_offset += merged.buf.len();
+                        }
                     }
+
+                    // Reuse first_event as master, set merged buffer and subtasks
+                    let mut master = info.first_event;
+                    master.set_merged_tasks(buffer, sub_tasks);
+                    Ok(Some(master))
                 }
-                None
+                Err(_) => Err(sub_tasks),
             }
+        } else {
+            Ok(None)
         }
     }
 
@@ -214,12 +212,33 @@ impl<C: CbArgs> MergeBuffer<C> {
     /// * `action` - The IO action (Read/Write) for the events.
     ///
     /// # Returns
-    /// An `Option<IOEvent<C>>` representing the merged event, a single original event, or `None` if the buffer was empty or merging failed.
+    /// - On success, an `Option<IOEvent<C>>` representing the merged event, a single original event, or `None` if the buffer was empty or merging failed.
+    /// - On failure, (no memory), will process the merged event CbArgs with on_failure, and return
+    ///   `None`
     #[inline]
-    pub fn flush(&mut self, fd: RawFd, action: IOAction) -> Option<IOEvent<C>> {
-        let mut master = self.take(action)?;
-        master.set_fd(fd);
-        Some(*master)
+    pub fn flush<F, B>(
+        &mut self, fd: RawFd, action: IOAction, on_failure: B,
+    ) -> Option<Box<IOEvent<C>>>
+    where
+        B: Borrow<F>,
+        F: Fn(C, Errno),
+    {
+        match self.take(action) {
+            Ok(Some(mut event)) => {
+                event.set_fd(fd);
+                Some(event)
+            }
+            Ok(None) => None,
+            Err(sub_tasks) => {
+                // Allocation failed: error out all events
+                for merged in sub_tasks.drain() {
+                    if let Some(args) = merged.args {
+                        (on_failure.borrow())(args, Errno::NOMEM);
+                    }
+                }
+                None
+            }
+        }
     }
 }
 
@@ -229,19 +248,32 @@ impl<C: CbArgs> MergeBuffer<C> {
 /// This component buffers incoming [`IOEvent`]s into a [`MergeBuffer`].
 /// It ensures that events for the same file descriptor and IO action are
 /// considered for merging to optimize system calls.
+///
+/// `C`: The custom callback args for merged IOEvent
+/// `S`: The channel sender to submit IOEvent
+/// `B`: owned MergeBuffer, or reference to MergeBuffer
+/// `F`: the callback closure to process the merged event `C` on failure, allow them to capture
+///    customized parameters
 pub struct MergeSubmitter<
     C: CbArgs,
     S: BlockingTxTrait<Box<IOEvent<C>>>,
     B: BorrowMut<MergeBuffer<C>>,
+    F: Fn(C, Errno),
 > {
     fd: RawFd,
     buffer: B,
     sender: S,
     action: IOAction,
+    on_failure: F,
     _phan: PhantomData<fn(&C)>,
 }
 
-impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S, MergeBuffer<C>> {
+impl<C, S, F> MergeSubmitter<C, S, MergeBuffer<C>, F>
+where
+    C: CbArgs,
+    S: BlockingTxTrait<Box<IOEvent<C>>>,
+    F: Fn(C, Errno),
+{
     /// Creates a new `MergeSubmitter`.
     ///
     /// # Arguments
@@ -250,24 +282,31 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>> MergeSubmitter<C, S, MergeB
     /// * `merge_size_limit` - The maximum data size for a merged event buffer.
     /// * `action` - The primary IO action (Read/Write) for this submitter.
     #[inline]
-    pub fn new(fd: RawFd, sender: S, merge_size_limit: usize, action: IOAction) -> Self {
+    pub fn new(
+        fd: RawFd, sender: S, merge_size_limit: usize, action: IOAction, on_failure: F,
+    ) -> Self {
         log_assert!(merge_size_limit > 0);
         Self {
             fd,
             sender,
             action,
             buffer: MergeBuffer::<C>::new(merge_size_limit),
+            on_failure,
             _phan: Default::default(),
         }
     }
 }
 
-impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>, B: BorrowMut<MergeBuffer<C>>>
-    MergeSubmitter<C, S, B>
+impl<C, S, B, F> MergeSubmitter<C, S, B, F>
+where
+    C: CbArgs,
+    S: BlockingTxTrait<Box<IOEvent<C>>>,
+    B: BorrowMut<MergeBuffer<C>>,
+    F: Fn(C, Errno),
 {
     #[inline]
-    pub fn with_buffer(fd: RawFd, sender: S, action: IOAction, buffer: B) -> Self {
-        Self { fd, sender, action, buffer, _phan: Default::default() }
+    pub fn with_buffer(fd: RawFd, sender: S, action: IOAction, buffer: B, on_failure: F) -> Self {
+        Self { fd, sender, action, buffer, _phan: Default::default(), on_failure }
     }
 
     /// Adds an [`IOEvent`] to the internal buffer, potentially triggering a flush.
@@ -284,20 +323,19 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>, B: BorrowMut<MergeBuffer<C>
     /// When submit sender closed, set Errno::SHUTDOWN on `event` and return the same Errno
     /// On debug mode, will validate event.fd and event.action.
     #[inline]
-    pub fn add_event(&mut self, mut event: IOEvent<C>) -> Result<(), Errno> {
+    pub fn add_event(&mut self, event: IOEvent<C>) -> Result<(), Errno> {
         log_debug_assert_eq!(self.fd, event.fd);
         log_debug_assert_eq!(event.action, self.action);
         let event_size = event.get_size();
         let buffer = self.buffer.borrow_mut();
 
-        if (event_size >= buffer.merge_size_limit as u64 || !buffer.may_add_event(&event))
-            && let Err(e) = self._flush()
-        {
-            event.set_errno(e);
-            event._callback_unchecked(false, |args: C, _offset: i64, _res| {
-                args.set_merge_error(e);
-            });
-            return Err(e);
+        if event_size >= buffer.merge_size_limit as u64 || !buffer.may_add_event(&event) {
+            if let Err(e) = self._flush() {
+                if let Some(TaskArgs::Callback(args)) = event.args {
+                    (self.on_failure)(args, e);
+                }
+                return Err(e);
+            }
         }
         if self.buffer.borrow_mut().push_event(event) {
             self._flush()?;
@@ -316,14 +354,15 @@ impl<C: CbArgs, S: BlockingTxTrait<Box<IOEvent<C>>>, B: BorrowMut<MergeBuffer<C>
 
     #[inline(always)]
     fn _flush(&mut self) -> Result<(), Errno> {
-        if let Some(event) = self.buffer.borrow_mut().flush(self.fd, self.action) {
+        if let Some(event) =
+            self.buffer.borrow_mut().flush::<F, &F>(self.fd, self.action, &self.on_failure)
+        {
             trace!("mio: submit event from flush {:?}", event);
-            if let Err(SendError(mut fail_event)) = self.sender.send(Box::new(event)) {
+            if let Err(SendError(fail_event)) = self.sender.send(event) {
                 let e = Errno::SHUTDOWN;
-                fail_event.set_errno(e);
-                fail_event._callback_unchecked(false, |args: C, _offset: i64, _res| {
-                    args.set_merge_error(e);
-                });
+                if let Some(TaskArgs::Callback(args)) = fail_event.args {
+                    (self.on_failure)(args, e);
+                }
                 return Err(e);
             }
         }

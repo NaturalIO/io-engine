@@ -22,10 +22,7 @@ impl IOAction {
     }
 }
 
-pub trait CbArgs: Sized + 'static + Send + Unpin {
-    /// only called in MergeSubmitter (for NOMEM or SHUTDOWN)
-    fn set_merge_error(self, _e: Errno) {}
-}
+pub trait CbArgs: Sized + 'static + Send + Unpin {}
 
 impl CbArgs for () {}
 
@@ -218,11 +215,6 @@ impl<C: CbArgs> IOEvent<C> {
         } else {
             return Err(Errno::from_raw_os_error(-res));
         }
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_errno(&mut self, errno: Errno) {
-        self.res = -errno.raw_os_error();
     }
 
     #[inline(always)]
