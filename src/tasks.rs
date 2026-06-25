@@ -91,6 +91,16 @@ impl<C: CbArgs> IOEvent<C> {
         }
     }
 
+    #[inline]
+    pub fn new_fsync(fd: RawFd) -> Self {
+        Self::new_no_buf(fd, IOAction::Fsync, 0, 0)
+    }
+
+    #[inline]
+    pub fn new_fallocate(fd: RawFd, offset: i64, len: u64) -> Self {
+        Self::new_no_buf(fd, IOAction::Alloc, offset, len)
+    }
+
     #[inline(always)]
     pub fn set_fd(&mut self, fd: RawFd) {
         self.fd = fd;

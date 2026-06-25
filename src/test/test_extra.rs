@@ -25,7 +25,7 @@ fn test_fallocate(#[case] driver: Driver) {
     }));
     setup::<(), _, _>(1, rx, worker, driver).unwrap();
 
-    let mut event = IOEvent::new_no_buf(fd, IOAction::Alloc, 0, 4096);
+    let mut event = IOEvent::new_fallocate(fd, 0, 4096);
     event.set_args(());
     tx.send(Box::new(event)).unwrap();
     assert!(done_rx.recv().unwrap().is_ok());
@@ -59,7 +59,7 @@ fn test_fsync(#[case] driver: Driver) {
     }));
     setup::<(), _, _>(1, rx, worker, driver).unwrap();
 
-    let mut event = IOEvent::new_no_buf(fd, IOAction::Fsync, 0, 0);
+    let mut event = IOEvent::new_fsync(fd);
     event.set_args(());
     tx.send(Box::new(event)).unwrap();
 
