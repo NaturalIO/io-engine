@@ -18,9 +18,9 @@ io-engine-aio-bindings = "0.1"
 log = "0.4"
 captains-log = "0"
 io-buffer = { version="1"}
-crossfire = ">=3.1.16"
+crossfire = ">=3.1.19"
 io-uring = "0.7"
-embed-collections = { version=">=0.12", features=["seglist"], default-features=false }
+embed-seglist = "0.1"
 
 [dev-dependencies]
 fastrand = "2.3"

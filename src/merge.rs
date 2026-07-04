@@ -34,7 +34,7 @@
 
 use crate::tasks::{CbArgs, IOAction, IOEvent, IOEventMerged, TaskArgs};
 use crossfire::{BlockingTxTrait, SendError};
-use embed_collections::SegList;
+use embed_seglist::SegList;
 use io_buffer::Buffer;
 use rustix::io::Errno;
 use std::borrow::{Borrow, BorrowMut};
@@ -231,7 +231,7 @@ impl<C: CbArgs> MergeBuffer<C> {
             Ok(None) => None,
             Err(sub_tasks) => {
                 // Allocation failed: error out all events
-                for merged in sub_tasks.drain() {
+                for merged in sub_tasks {
                     if let Some(args) = merged.args {
                         (on_failure.borrow())(args, Errno::NOMEM);
                     }

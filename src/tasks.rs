@@ -2,7 +2,7 @@ use std::fmt;
 use std::os::fd::RawFd;
 
 use crossfire::waitgroup::WaitGroupGuard;
-use embed_collections::SegList;
+use embed_seglist::SegList;
 use io_buffer::{Buffer, safe_copy};
 use rustix::io::Errno;
 
