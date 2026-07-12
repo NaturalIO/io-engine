@@ -62,7 +62,7 @@
 //! ## Example (TxOneshot as CbArgs and Short I/O handling)
 //!
 //! ```rust
-//! use io_engine::{setup, Driver, IOAction, IOEvent, CbArgs};
+//! use io_engine::{setup, Driver, IOAction, IOEvent};
 //! use io_buffer::{Buffer, rand_buffer};
 //! use std::fs::OpenOptions;
 //! use std::os::fd::AsRawFd;
@@ -71,8 +71,6 @@
 //! use crossfire::{mpsc, oneshot, MTx};
 //!
 //! struct OneshotArg (oneshot::TxOneshot<Result<Option<Buffer>, Errno>>);
-//!
-//! impl CbArgs for OneshotArg {}
 //!
 //! // 1. Prepare file
 //! let file = OpenOptions::new()

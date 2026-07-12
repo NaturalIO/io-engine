@@ -1,7 +1,6 @@
 use std::fmt;
 use std::os::fd::RawFd;
 
-use crossfire::waitgroup::WaitGroupGuard;
 use embed_seglist::SegList;
 use io_buffer::{Buffer, safe_copy};
 use rustix::io::Errno;
@@ -22,11 +21,12 @@ impl IOAction {
     }
 }
 
-pub trait CbArgs: Sized + 'static + Send + Unpin {}
+// An trait alias for callback argument
+//
+// to embed in IOEvent
+pub trait CbArgs: Sized + 'static + Send {}
 
-impl CbArgs for () {}
-
-impl<T: Send + Sync + 'static> CbArgs for WaitGroupGuard<T> {}
+impl<T: Sized + 'static + Send> CbArgs for T {}
 
 // Carries the information of read/write event
 pub struct IOEvent<C: CbArgs> {
@@ -106,7 +106,7 @@ impl<C: CbArgs> IOEvent<C> {
         self.fd = fd;
     }
 
-    /// Set callback for IOEvent, might be closure or a custom struct
+    /// Set callback argument for IOEvent
     #[inline(always)]
     pub fn set_args(&mut self, args: C) {
         self.args.replace(TaskArgs::Callback(args));
