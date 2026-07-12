@@ -212,13 +212,14 @@ impl<C: CbArgs> MergeBuffer<C> {
     /// * `action` - The IO action (Read/Write) for the events.
     ///
     /// # Returns
-    /// - On success, an `Option<IOEvent<C>>` representing the merged event, a single original event, or `None` if the buffer was empty or merging failed.
+    /// - On success, an `Ok(Option<IOEvent<C>>)` representing the merged event,
+    ///   - a single original event, or `Ok(None)` if the buffer was empty or merging failed.
     /// - On failure, (no memory), will process the merged event CbArgs with on_failure, and return
-    ///   `None`
+    ///  `Err(Errno::NOMEM)`
     #[inline]
     pub fn flush<F, B>(
         &mut self, fd: RawFd, action: IOAction, on_failure: B,
-    ) -> Option<Box<IOEvent<C>>>
+    ) -> Result<Option<Box<IOEvent<C>>>, Errno>
     where
         B: Borrow<F>,
         F: Fn(C, Errno),
@@ -226,9 +227,9 @@ impl<C: CbArgs> MergeBuffer<C> {
         match self.take(action) {
             Ok(Some(mut event)) => {
                 event.set_fd(fd);
-                Some(event)
+                Ok(Some(event))
             }
-            Ok(None) => None,
+            Ok(None) => Ok(None),
             Err(sub_tasks) => {
                 // Allocation failed: error out all events
                 for merged in sub_tasks {
@@ -236,7 +237,7 @@ impl<C: CbArgs> MergeBuffer<C> {
                         (on_failure.borrow())(args, Errno::NOMEM);
                     }
                 }
-                None
+                Err(Errno::NOMEM)
             }
         }
     }
@@ -355,7 +356,7 @@ where
     #[inline(always)]
     fn _flush(&mut self) -> Result<(), Errno> {
         if let Some(event) =
-            self.buffer.borrow_mut().flush::<F, &F>(self.fd, self.action, &self.on_failure)
+            self.buffer.borrow_mut().flush::<F, &F>(self.fd, self.action, &self.on_failure)?
         {
             trace!("mio: submit event from flush {:?}", event);
             if let Err(SendError(fail_event)) = self.sender.send(event) {

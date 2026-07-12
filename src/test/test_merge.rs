@@ -180,7 +180,7 @@ fn test_event_merge_buffer_logic() {
     let fd = 100; // Dummy fd
 
     // --- Test empty flush ---
-    assert!(buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).is_none());
+    assert!(buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).unwrap().is_none());
     assert_eq!(buffer.len(), 0);
 
     // --- Scenario 1: Add a single event ---
@@ -193,7 +193,7 @@ fn test_event_merge_buffer_logic() {
     assert_eq!(buffer.len(), 1);
 
     // Flush single event
-    let single_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
+    let single_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).unwrap();
     assert!(single_event_opt.is_some());
     let single_event = single_event_opt.unwrap();
     assert_eq!(single_event.offset, event1_clone.offset);
@@ -218,7 +218,7 @@ fn test_event_merge_buffer_logic() {
 
     // Now, flush the buffered events and check them
     assert_eq!(buffer.len(), 2);
-    let merged_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
+    let merged_event_opt = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).unwrap();
     assert!(merged_event_opt.is_some());
     let merged_event = merged_event_opt.unwrap();
     assert_eq!(merged_event.offset, 0);
@@ -240,7 +240,7 @@ fn test_event_merge_buffer_logic() {
     assert!(is_full);
     assert_eq!(buffer.len(), 2);
 
-    let merged_event_opt_2 = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>);
+    let merged_event_opt_2 = buffer.flush(fd, IOAction::Write, on_merge_failure::<()>).unwrap();
     assert!(merged_event_opt_2.is_some());
     let merged_event_2 = merged_event_opt_2.unwrap();
     assert_eq!(merged_event_2.offset, 3072);
